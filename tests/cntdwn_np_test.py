@@ -7,8 +7,8 @@ from seven_seg_control import init_gpio, reset_7seg
 from neopixel_control import rainbow_cycle
 from shutter_control import shutter_countdown
 
-shutter_btn_pin = 24
-countdown_led_pin = 22
+shutter_btn_pin = 23
+countdown_led_pin = 24
 
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)

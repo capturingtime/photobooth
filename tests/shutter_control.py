@@ -7,8 +7,8 @@ from seven_seg_control import set_digit
 COUNTDOWN = 3
 OUTPUT_DIR = "/home/pi/booth_images"
 PHOTO_PREFIX = "photobooth_"
-shutter_btn_pin = 24
-countdown_led_pin = 22
+shutter_btn_pin = 23
+countdown_led_pin = 24
 
 
 def check_output_dir():

@@ -9,8 +9,8 @@ import subprocess
 
 OUTPUT_DIR = "/home/pi/booth_images"
 PHOTO_PREFIX = "photobooth_"
-shutter_btn_pin = 24
-countdown_led_pin = 22
+shutter_btn_pin = 25
+countdown_led_pin = 24
 
 
 check_output_dir()
