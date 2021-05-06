@@ -7,7 +7,7 @@ Currently supports a RaspberryPi 4B controlling somenumber of NeoPixel (ws281x) 
 
 # Quickstart
 ```shell
-sudo pip3 install -e git+https://github.com/namachieli/rpi_photobooth.git#egg=photobooth
+sudo pip3 install -e git+https://github.com/namachieli/photobooth.git#egg=photobooth
 sudo python3
 ```
 ```python

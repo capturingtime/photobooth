@@ -1,7 +1,8 @@
 from escpos.printer import Usb
 from inspect import getfullargspec
 
-# Lookup https://www.the-sz.com/products/usbid/
+# Lookup USB Devices - https://www.the-sz.com/products/usbid/
+# TODO: Maybe convert this to a collection of YAML files that are ingested?
 PRINTER_MAP = {
     "default": {
         "model": "Unknown",
@@ -56,7 +57,7 @@ class Printer():
     """
     def __init__(self,
                  name: str = "",
-                 printerModel: str = "",
+                 model: str = "",
                  **kwargs):
 
         if not name:
@@ -64,8 +65,8 @@ class Printer():
             name = f"printer-{id(self)}"
         self.name = name
 
-        if printerModel:
-            self.printer_spec = PRINTER_MAP.get(str(printerModel), dict())
+        if model:
+            self.printer_spec = PRINTER_MAP.get(str(model), dict())
         else:
             self.printer_spec = PRINTER_MAP.get("default")
 
@@ -84,6 +85,8 @@ class Printer():
         config = self.printer_spec['config']
         self.printer = Usb(**config)
 
+        # TODO: Add logic that verifies the printer is working
+
     def ln(self, count=1):
         """ feeds n lines to print buffer
             replicates Escpos().ln() in newer version (>=3.0)
@@ -99,7 +102,8 @@ class Printer():
         """ Pass through to Escpos().text()
             https://github.com/python-escpos/python-escpos/blob/cbe38648f50dd42e25563bd8603953eaa13cb7f6/src/escpos/escpos.py#L424
         """
-        return self.printer.text(text)
+        self.printer.text(text)
+        return True
 
     def cut(self, mode="PART"):
         """ Pass through to Escpos().cut()
@@ -107,12 +111,14 @@ class Printer():
         """
         return self.printer.cut(mode)
 
+    # TODO: Make this better
     def barcode(self, *args, **kwargs):
         """ Pass through to Escpos().barcode()
             https://github.com/python-escpos/python-escpos/blob/cbe38648f50dd42e25563bd8603953eaa13cb7f6/src/escpos/escpos.py#L295
         """
         return self.printer.barcode(*args, **kwargs)
 
+    # TODO: Make this better
     def qr(self, *args, **kwargs):
         """ Pass through to Escpos().qr()
             https://github.com/python-escpos/python-escpos/blob/cbe38648f50dd42e25563bd8603953eaa13cb7f6/src/escpos/escpos.py#L134

@@ -1,0 +1,30 @@
+{% load static %}
+<!DOCTYPE html>
+<html>
+<head>
+    <style>
+        body {
+            background-color: white;
+        }
+        * {
+            margin: 0;
+            padding: 0;
+        }
+        .imgbox {
+            display: grid;
+            height: 100%;
+        }
+        .center-fit {
+            max-width: 100%;
+            max-height: 100vh;
+            margin: auto;
+        }
+    </style>
+</head>
+<body>
+  <div class="imgbox">
+    <!-- The Django way -->
+    <img src="{% static "img/main.png" %}"  class="center-fit">
+  </div>
+</body>
+</html>

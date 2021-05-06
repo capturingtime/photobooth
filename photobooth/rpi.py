@@ -14,8 +14,9 @@ DEFAULT_PIN_MAP = [
     ("print_rdy", "led", 19, "out", False),
     ("shutter_rdy", "led", 26, "out", False),
     ("printing", "led", 0, "out", False),
-    ("print", "btn", 23, "in", None),
-    ("capture", "btn", 25, "in", None),
+    ("print", "sw", 23, "in", None),
+    ("last_shot", "sw", 24, "in", None),
+    ("capture", "sw", 25, "in", None),
     ("pixel", "ctl", 18, "out", False)
 ]
 
@@ -80,6 +81,7 @@ class RPi(Booth):
 
         self.gpio.init = True
         self.logger.info('Init Complete')
+
         # Illuminate the 'GPIO Init" LED'
         self.toggle_led(label="gpio_init", on=True)
 
@@ -136,35 +138,35 @@ class RPi(Booth):
             return None
         return pin[0]
 
-    def _check_is_led(self, label: str = "", pin: int = 0) -> bool:
-        """ Check that the label or pin is an LED and return True/False
+    def _check_pin_use(self, label: str = "", pin: int = 0, pintype: str = "led") -> bool:
+        """ Check that the label or pin is the correct type (use) and return True/False
         """
         # Check that atleast one of [label, pin] is set to non defaults
         if not label and not pin:
-            self.logger.warn("One of 'label' or 'pin' is required for _check_led_pin()")
+            self.logger.warn("One of 'label' or 'pin' is required for _check_pin_use()")
             return None
 
         if label and pin:
             # Hard prefer label over pin when conflict
             pin = 0
 
-        leds = self.gpio.map["led"]
+        pins = self.gpio.map[pintype]
 
-        if label and leds.get(label, None):
+        if label and pins.get(label, None):
             return True
         elif pin:
-            for label, values in leds.items():
+            for label, values in pins.items():
                 if pin == values["pin"]:
                     return True
         else:
             self.except_and_log(
-                ex_msg=f'Pin: {pin} not found as a configured LED in gpio.map: {self.gpio.map}')
-            return False  # Did not find a positive match for an LED, assume False
+                ex_msg=f'Pin: {pin} not found to be configured as {pintype} in {self.gpio.map}')
+            return False  # Did not find a positive match for a {pintype}, assume False
 
     def blink_led(self, label: str = "", pin: int = 0, speed=1) -> bool:
         """ blink an led once per speed (n seconds)
         """
-        if not self._check_is_led(label=label, pin=pin):
+        if not self._check_pin_use(label=label, pin=pin):
             return False
         if label:
             # effectively an override of anything supplied in pin
@@ -194,7 +196,7 @@ class RPi(Booth):
             Off: on=False
             Toggle: on=None
         """
-        if self._check_is_led(label=label, pin=pin):
+        if self._check_pin_use(label=label, pin=pin):
             if label:
                 pin = self._get_pin_by_label(label)
             if pin:
@@ -205,3 +207,18 @@ class RPi(Booth):
             return True
         else:
             return False
+
+    def check_sw_input(self, label: str = "", pin: int = 0) -> bool:
+        """ Checks the status of a button or switch, returns True/False accordingly
+        """
+        if self._check_pin_use(label=label, pin=pin, pintype="sw"):
+            if label:
+                pin = self._get_pin_by_label(label)
+            if pin:
+                return bool(self.gpio.input(pin))  # Set led to state
+
+    def clear_leds(self):
+        for label, data in self.gpio.map['led'].items():
+            self.toggle_led(label=label, on=data['init_state'])
+
+        return True

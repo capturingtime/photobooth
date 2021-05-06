@@ -27,7 +27,6 @@ setuptools.setup(
         "Adafruit-Blinka>=6.5.0",
         "adafruit-circuitpython-neopixel>=6.0.3",
         "python-escpos==2.2.0",
-        "aiofiles>=0.6.0",
-        "aiohttp>=3.7.4"
+        "django>=3.2.3"
     ]
 )

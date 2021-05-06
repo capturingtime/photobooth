@@ -3,6 +3,7 @@ import neopixel
 import time
 import os
 
+from random import randint
 from PIL import Image, ImageDraw, ImageFont
 
 ABSPATH = os.path.dirname(__file__)
@@ -17,9 +18,10 @@ CYAN = (0, 255, 255)
 ORANGE = (255, 128, 0)
 PINK = (255, 0, 128)
 WHITE = (255, 255, 255)
-OFF = (0, 0, 0)
+OFF = (0, 0, 0)  # Not included in color lists
 
-COLOR_LIST = ["RED", "GREEN", "BLUE", "YELLOW", "PURPLE", "CYAN", "ORANGE", "PINK", "WHITE", "OFF"]
+COLOR_LIST = ["RED", "GREEN", "BLUE", "YELLOW", "PURPLE", "CYAN", "ORANGE", "PINK", "WHITE"]
+COLOR_TUPLE_LIST = [RED, GREEN, BLUE, YELLOW, PURPLE, CYAN, ORANGE, PINK, WHITE]
 
 # The default brightness percent as a float (0.1 = 10%)
 DEFAULT_BRIGHTNESS = 0.1
@@ -27,12 +29,13 @@ DEFAULT_BRIGHTNESS = 0.1
 DEAFULT_ORDER = neopixel.GRB
 DEAFULT_PIN = board.D18
 
-DEFAULT_SCROLL_SPEED = 0.01
+DEFAULT_SPEED = 0.01
 
 
 def wheel(np, pos):
     """ Input a value 0 to 255 to get a color value.
         The colours are a transition r - g - b - back to r.
+        Source: Adafruit tutorials
     """
     if pos < 0 or pos > 255:
         r = g = b = 0
@@ -123,7 +126,7 @@ class Neopixel():
                  **kwargs):
 
         if not name:
-            # Forces a unique printer name
+            # Forces a unique name
             name = f"neopixel-{id(self)}"
 
         if not control:
@@ -138,45 +141,87 @@ class Neopixel():
         # board_pin = getattr(board, f"D{pin}")
 
         # Init
-        self.panel = neopixel.NeoPixel(
+        self.np = neopixel.NeoPixel(
             control, self.num_px, brightness=brightness, pixel_order=pixel_order,
             auto_write=auto_write, **kwargs)
 
+        # TODO: Add logic that verifies the panel is working
+
     def rainbow_cycle(self, wait_ms=1, iterations=1):
         """ Draw rainbow that uniformly distributes itself across all pixels.
+            Source: Adafruit tutorials
         """
         for j in range(255*iterations):
-            for i in range(self.panel.n):
-                pixel_index = (i * 256 // self.panel.n) + j
-                self.panel[i] = wheel(self.panel, pixel_index & 255)
-            self.panel.show()
+            for i in range(self.np.n):
+                pixel_index = (i * 256 // self.np.n) + j
+                self.np[i] = wheel(self.np, pixel_index & 255)
+            self.np.show()
             time.sleep(wait_ms/1000.0)
 
         return True
 
+    def color_chase(self, color: tuple = CYAN, wait: float = DEFAULT_SPEED):
+        """ Snake-like color chase from index 0 to -1
+            Source: Adafruit tutorials
+        """
+        for i in range(self.np.n):
+            self.np[i] = color
+            time.sleep(wait)
+            self.np.show()
+        return True
+
+    def twinkle(self, wait: float = DEFAULT_SPEED, count: int = 10):
+        """ Randomly selects a pixel, and flashes it with a random color
+            Source: Adafruit tutorials
+        """
+        last = None
+        for _ in range(count):
+            c = randint(0, len(COLOR_TUPLE_LIST) - 1)  # Choose random color index
+            j = randint(0, self.np.n - 1)  # Choose random pixel
+
+            # Check that the pixel is off (different pixel)
+            while self.np[j] == last:
+                j = randint(0, self.np.n - 1)  # Choose a different random pixel
+            last = j
+            self.np[j] = COLOR_TUPLE_LIST[c]  # Set pixel to color
+            self.np.show()
+            # Ramp up brightness
+            for i in range(1, 5):
+                self.np.brightness = i / 5.0
+                self.np.show()
+                time.sleep(wait)
+
+            # Ramp down brightness
+            for i in range(5, 0, -1):
+                self.np.brightness = i / 5.0
+                self.np[j] = OFF
+                self.np.show()
+                time.sleep(wait)
+
+    # TODO: Is reducing the current color of each pixel slowly to 0 a smoother execution?
     def fade_out(self, duration: int = 1):
         """ Fades out to OFF over the duration
         """
-        original_brightness = self.panel.brightness
+        original_brightness = self.np.brightness
 
         step_level = 0.01
         sleep_cycle = duration / (original_brightness / step_level)
 
-        while self.panel.brightness > 0:
+        while self.np.brightness > 0:
             # FIXME :
             # Im not totally sure why, but...
-            # self.panel.brightness -= step_level
-            # causes self.panel.brightness of 0.1 to become 0.09000000000000001
+            # self.np.brightness -= step_level
+            # causes self.np.brightness of 0.1 to become 0.09000000000000001
             # and i dont feel like figuring out why right now
-            self.panel.brightness = round(self.panel.brightness - step_level, 2)
-            self.panel.show()
+            self.np.brightness = round(self.np.brightness - step_level, 2)
+            self.np.show()
             time.sleep(sleep_cycle)
 
-        self.panel.fill(OFF)
-        self.panel.show()
+        self.np.fill(OFF)
+        self.np.show()
 
         # Reset brightness to original value now that pixels are OFF
-        self.panel.brightness = original_brightness
+        self.np.brightness = original_brightness
 
         return True
 
@@ -213,7 +258,7 @@ class Neopixel():
         return image
 
     def scroll(self, text,
-               speed: float = DEFAULT_SCROLL_SPEED,
+               speed: float = DEFAULT_SPEED,
                count=1,
                offset_x: int = 0,
                color: tuple((int, int, int)) = WHITE):
@@ -250,30 +295,37 @@ class Neopixel():
                 for x in range(cols):
                     for y in range(rows):
                         if text.getpixel((x + offset_x, y)) == 255:
-                            self.panel[getIndex(x, y, rows, cols)] = color
+                            self.np[getIndex(x, y, rows, cols)] = color
                         else:
-                            self.panel[getIndex(x, y, rows, cols)] = (0, 0, 0)
+                            self.np[getIndex(x, y, rows, cols)] = (0, 0, 0)
                 offset_x += 1
                 if offset_x + cols > text.size[0]:
                     offset_x = 0
-                self.panel.show()
+                self.np.show()
                 time.sleep(speed)  # scrolling text speed
                 i -= 1
         self.clear()  # Sometimes the last few px are visible, this just clears it off.
         return True
 
     # TODO :
-    def flash(self):
+    def flash(self, **kwargs):
         """ Flash the input on the board n times
             width is limited by width of panel
         """
-        pass
+        self.scroll(**kwargs)  # Temporary, will be replaced
+
+    # TODO :
+    def cycle_text(self, **kwargs):
+        """ given a list of strings, alternate randomly through them
+            using scroll, flash, etc.
+        """
+        self.scroll(**kwargs)  # Temporary, will be replaced
 
     def clear(self):
         """ clear the panel and set all pixels to OFF
         """
-        self.panel.fill(OFF)
-        self.panel.show()
+        self.np.fill(OFF)
+        self.np.show()
         return True
 
     def fill(self, color=WHITE):
@@ -301,23 +353,25 @@ class Neopixel():
                                  "please use a number in the range 0-255")
             else:
                 color = (color, color, color)
-        self.panel.fill(color)
-        self.panel.show()
+        self.np.fill(color)
+        self.np.show()
         return True
 
-    def panel_test(self):
+    def panel_test(self, extended=False):
         """ Runs a panel test by cycling some various logic
         """
-        self.scroll(text="Panel test in progress...")
-        time.sleep(0.5)
-        self.scroll(text="ABCDEFGHIJKLMNOPQRSTUVQXYZ", color=RED)
-        time.sleep(0.5)
-        self.scroll(text="abcdefghijklmnopqrstuvwxyz", color=GREEN)
-        time.sleep(0.5)
-        self.scroll(text="1234567890!@#$%^&*(){}[]:;\"'~`+-\\/=_,.<>", color=BLUE)
-        time.sleep(0.5)
+
+        self.scroll(text="Panel test in progress...", speed=0.001)
+        time.sleep(0.25)
+        if extended:
+            self.scroll(text="ABCDEFGHIJKLMNOPQRSTUVQXYZ", color=RED, speed=0.001)
+            time.sleep(0.25)
+            self.scroll(text="abcdefghijklmnopqrstuvwxyz", color=GREEN, speed=0.001)
+            time.sleep(0.25)
+            self.scroll(text="1234567890!@#$%^&*(){}[]:;\"'~`+-\\/=_,.<>", color=BLUE, speed=0.001)
+            time.sleep(0.25)
         for color in COLOR_LIST:
             self.fill(color)
-            time.sleep(1)
-        self.rainbow_cycle(iterations=2)
-        self.fade_out()
+            time.sleep(.2)
+        self.rainbow_cycle(iterations=1)
+        self.fade_out(duration=1)
