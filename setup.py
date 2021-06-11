@@ -6,18 +6,17 @@ with open("README.md", "r") as fh:
 setuptools.setup(
     name="photobooth",
     version="0.0.1",
-    author="Ian Price",
-    author_email="ianmprice@gmail.com",
+    author="Namachieli",
     license='MIT',
-    description="An rpi photobooth",  # pylint: disable=E501; # noqa: E501
+    description="A Photobooth Framework",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/namachieli/rpi_photobooth",
+    url="https://github.com/namachieli/photobooth",
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3.7",
         "Operating System :: OS Independent",
-        "License :: OSI Approved :: MIT License",
+        "License :: OSI Approved :: BSD-3-Clause",
         "Development Status :: 1 - Pre-Alpha"
     ],
     python_requires='>=3.7.3',
@@ -27,7 +26,6 @@ setuptools.setup(
         "Adafruit-Blinka>=6.5.0",
         "adafruit-circuitpython-neopixel>=6.0.3",
         "python-escpos==2.2.0",
-        "aiofiles>=0.6.0",
-        "aiohttp>=3.7.4"
+        "django>=3.2.3"
     ]
 )
