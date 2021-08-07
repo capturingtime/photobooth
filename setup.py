@@ -11,7 +11,7 @@ setuptools.setup(
     description="A Photobooth Framework",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    url="https://github.com/namachieli/photobooth",
+    url="https://github.com/capturingtime/photobooth",
     packages=setuptools.find_packages(),
     classifiers=[
         "Programming Language :: Python :: 3.7",

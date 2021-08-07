@@ -1,3 +1,7 @@
+"""
+This example assumes you have connected your Raspberry Pi 4 according to the diagram in the readme
+"""
+
 import board
 import time
 
@@ -45,7 +49,6 @@ print("Booth is online and ready")
 # Booth is ready
 booth.toggle_led(label="shutter_rdy", on=True)
 
-# probably needs to be multiprocessing
 attract = booth.run_as_thread(panel.scroll, start=True, speed=0.01,
                               text="Press the capture button to begin!  ",)
 
