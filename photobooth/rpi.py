@@ -4,28 +4,29 @@ from photobooth.booth import Booth
 import RPi.GPIO as GPIO
 import time
 
-#   (label, use, pin, io, init_state)
+#   (label, use, gpio, io, init_state)
 # if label=pin is passed as kwarg, it will be used as an override.
 DEFAULT_PIN_MAP = [
-    ("gpio_init", "led", 17, "out", False),
-    ("net_local", "led", 27, "out", False),
-    ("net_www", "led", 22, "out", False),
-    ("camera_rdy", "led", 13, "out", False),
-    ("print_rdy", "led", 19, "out", False),
-    ("shutter_rdy", "led", 26, "out", False),
-    ("printing", "led", 0, "out", False),
-    ("print", "sw", 23, "in", None),
-    ("last_shot", "sw", 24, "in", None),
-    ("capture", "sw", 25, "in", None),
-    ("pixel", "ctl", 18, "out", False)
+    ("gpio_init", "led", 17, "out", False),  # Pin 11
+    ("net_local", "led", 27, "out", False),  # Pin 13
+    ("net_www", "led", 22, "out", False),  # Pin 15
+    ("camera_rdy", "led", 13, "out", False),  # Pin 33
+    ("print_rdy", "led", 19, "out", False),  # Pin 35
+    ("shutter_rdy", "led", 26, "out", False),  # Pin 37
+    ("printing", "led", 0, "out", False),  # Pin
+    ("print", "sw", 23, "in", None),  # Pin 16
+    ("last_shot", "sw", 24, "in", None),  # Pin 18
+    ("capture", "sw", 25, "in", None),  # Pin 22
+    ("pixel", "ctl", 18, "out", False),  # Pin 12
 ]
 
 
 class RPi(Booth):
-    """ A Class to manage how a Raspberry Pi would be used in a booth.
-        Currently built spcifically for a RPi 4B
-        Could be extended to be model aware
+    """A Class to manage how a Raspberry Pi would be used in a booth.
+    Currently built spcifically for a RPi 4B
+    Could be extended to be model aware
     """
+
     # SBC Single Board Computer | MP Microprocessor | MCU Microcontroller
     compute_type = "SBC"
     family = "Raspberry Pi"
@@ -40,9 +41,8 @@ class RPi(Booth):
         self._init_gpio()
 
     def _init_gpio(self):
-        """ Initialize the GPIO pins provided or use defaults
-        """
-        self.logger.info('Initializing GPIO')
+        """Initialize the GPIO pins provided or use defaults"""
+        self.logger.info("Initializing GPIO")
 
         self.gpio = GPIO
         setattr(self.gpio, "init", False)
@@ -59,17 +59,19 @@ class RPi(Booth):
 
         for use in self.gpio.map.values():
             for label, values in use.items():
-                pin = values['pin']
-                io = values['io']
-                state = values['init_state']
+                pin = values["pin"]
+                io = values["io"]
+                state = values["init_state"]
 
                 if io == "in":
                     m = GPIO.IN
                 elif io == "out":
                     m = GPIO.OUT
                 else:
-                    msg = f"Incorrect value for IO mode for {label} on pin: {pin}. "\
-                          "Expecting one of ['in', 'out']"
+                    msg = (
+                        f"Incorrect value for IO mode for {label} on pin: {pin}. "
+                        "Expecting one of ['in', 'out']"
+                    )
                     self._reset_and_cleanup()
                     self.except_and_log(ex_msg=msg)
 
@@ -80,23 +82,18 @@ class RPi(Booth):
                     self.gpio.output(pin, state)
 
         self.gpio.init = True
-        self.logger.info('Init Complete')
+        self.logger.info("Init Complete")
 
         # Illuminate the 'GPIO Init" LED'
         self.toggle_led(label="gpio_init", on=True)
 
     def _configure_pins(self):
-        """ Handles setup of pins based on defaults and overrides passed in self.kwargs
-        """
+        """Handles setup of pins based on defaults and overrides passed in self.kwargs"""
         # Set defaults
         for label, use, pin, io, init_state in DEFAULT_PIN_MAP:
             if not self.gpio.map.get(use, None):
                 self.gpio.map[use] = dict()
-            self.gpio.map[use][label] = {
-                "pin": pin,
-                "io": io,
-                "init_state": init_state
-            }
+            self.gpio.map[use][label] = {"pin": pin, "io": io, "init_state": init_state}
             self.gpio.pins[label] = pin
 
         # Override defaults from input
@@ -114,33 +111,35 @@ class RPi(Booth):
             self.except_and_log(ex_msg=f"Duplicate pin configured: {self.gpio.pins}")
 
     def _reset_and_cleanup(self):
-        """ Cleans up physical indicators and resets to basic state
-        """
+        """Cleans up physical indicators and resets to basic state"""
         self.gpio.init = False
         self._init_gpio()
 
-        for led, values in self.gpio.map['led'].items():
-            pin = values['pin']
-            state = values['init_state']
+        for led, values in self.gpio.map["led"].items():
+            pin = values["pin"]
+            state = values["init_state"]
             self.gpio.output(pin, state)
 
     def _get_pin_by_label(self, label: str = "") -> dict:
-        """ Find the pin number based on the pin label
-        """
+        """Find the pin number based on the pin label"""
         if not label:
-            self.except_and_log(ex_msg="'label' is a required argument for _get_pin_by_label()")
+            self.except_and_log(
+                ex_msg="'label' is a required argument for _get_pin_by_label()"
+            )
 
         # Should only return 0 or 1 list items since label/k is unique
         pin = [v for k, v in self.gpio.pins.items() if label == k]
         if not pin:
             self.except_and_log(
-                ex_msg=f"Unable to find a pin for {label} in gpio.pins: {self.gpio.pins}")
+                ex_msg=f"Unable to find a pin for {label} in gpio.pins: {self.gpio.pins}"
+            )
             return None
         return pin[0]
 
-    def _check_pin_use(self, label: str = "", pin: int = 0, pintype: str = "led") -> bool:
-        """ Check that the label or pin is the correct type (use) and return True/False
-        """
+    def _check_pin_use(
+        self, label: str = "", pin: int = 0, pintype: str = "led"
+    ) -> bool:
+        """Check that the label or pin is the correct type (use) and return True/False"""
         # Check that atleast one of [label, pin] is set to non defaults
         if not label and not pin:
             self.logger.warn("One of 'label' or 'pin' is required for _check_pin_use()")
@@ -160,12 +159,12 @@ class RPi(Booth):
                     return True
         else:
             self.except_and_log(
-                ex_msg=f'Pin: {pin} not found to be configured as {pintype} in {self.gpio.map}')
+                ex_msg=f"Pin: {pin} not found to be configured as {pintype} in {self.gpio.map}"
+            )
             return False  # Did not find a positive match for a {pintype}, assume False
 
     def blink_led(self, label: str = "", pin: int = 0, speed=1) -> bool:
-        """ blink an led once per speed (n seconds)
-        """
+        """blink an led once per speed (n seconds)"""
         if not self._check_pin_use(label=label, pin=pin):
             return False
         if label:
@@ -191,10 +190,10 @@ class RPi(Booth):
         return True
 
     def toggle_led(self, label: str = "", pin: int = 0, on: bool = None):
-        """ Toggle or set an LED to state
-            On: on=True
-            Off: on=False
-            Toggle: on=None
+        """Toggle or set an LED to state
+        On: on=True
+        Off: on=False
+        Toggle: on=None
         """
         if self._check_pin_use(label=label, pin=pin):
             if label:
@@ -209,8 +208,7 @@ class RPi(Booth):
             return False
 
     def check_sw_input(self, label: str = "", pin: int = 0) -> bool:
-        """ Checks the status of a button or switch, returns True/False accordingly
-        """
+        """Checks the status of a button or switch, returns True/False accordingly"""
         if self._check_pin_use(label=label, pin=pin, pintype="sw"):
             if label:
                 pin = self._get_pin_by_label(label)
@@ -218,7 +216,7 @@ class RPi(Booth):
                 return bool(self.gpio.input(pin))  # Set led to state
 
     def clear_leds(self):
-        for label, data in self.gpio.map['led'].items():
-            self.toggle_led(label=label, on=data['init_state'])
+        for label, data in self.gpio.map["led"].items():
+            self.toggle_led(label=label, on=data["init_state"])
 
         return True
