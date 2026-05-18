@@ -1,11 +1,11 @@
+import asyncio
+
 from photobooth.booth import Booth
 
-
 import RPi.GPIO as GPIO
-import time
 
-#   (label, use, gpio, io, init_state)
-# if label=pin is passed as kwarg, it will be used as an override.
+#   (label, use, gpio_bcm_pin, io, init_state)
+# Pass label=pin_number as a kwarg to RPi() to override any default pin.
 DEFAULT_PIN_MAP = [
     ("gpio_init", "led", 17, "out", False),  # Pin 11
     ("net_local", "led", 27, "out", False),  # Pin 13
@@ -13,35 +13,32 @@ DEFAULT_PIN_MAP = [
     ("camera_rdy", "led", 13, "out", False),  # Pin 33
     ("print_rdy", "led", 19, "out", False),  # Pin 35
     ("shutter_rdy", "led", 26, "out", False),  # Pin 37
-    ("printing", "led", 0, "out", False),  # Pin
-    ("print", "sw", 23, "in", None),  # Pin 16
-    ("last_shot", "sw", 24, "in", None),  # Pin 18
-    ("capture", "sw", 25, "in", None),  # Pin 22
+    ("printing", "led", 0, "out", False),  # Pin TBD
+    ("green", "sw", 23, "in", None),   # Pin 16 — keep / print / show last shot
+    ("red", "sw", 24, "in", None),     # Pin 18 — redo / start over
+    ("capture", "sw", 25, "in", None), # Pin 22 — shutter / continue
     ("pixel", "ctl", 18, "out", False),  # Pin 12
 ]
 
 
 class RPi(Booth):
-    """A Class to manage how a Raspberry Pi would be used in a booth.
-    Currently built spcifically for a RPi 4B
-    Could be extended to be model aware
+    """Raspberry Pi 4B photobooth controller.
+
+    Extends Booth with GPIO management and an asyncio event bridge.
+    Call setup_gpio_events(loop) after the asyncio event loop is running to
+    register GPIO interrupts that push button labels into self.event_queue.
     """
 
-    # SBC Single Board Computer | MP Microprocessor | MCU Microcontroller
     compute_type = "SBC"
     family = "Raspberry Pi"
 
     def __init__(self, **kwargs):
         self.kwargs = kwargs
-
-        # Init Booth
         Booth.__init__(self)
-
-        # init and setup GPIO
         self._init_gpio()
 
-    def _init_gpio(self):
-        """Initialize the GPIO pins provided or use defaults"""
+    def _init_gpio(self) -> None:
+        """Initialize GPIO pins from DEFAULT_PIN_MAP with optional overrides."""
         self.logger.info("Initializing GPIO")
 
         self.gpio = GPIO
@@ -54,8 +51,7 @@ class RPi(Booth):
 
         self._configure_pins()
 
-        mode = GPIO.BCM
-        self.gpio.setmode(mode)
+        self.gpio.setmode(GPIO.BCM)
 
         for use in self.gpio.map.values():
             for label, values in use.items():
@@ -68,155 +64,148 @@ class RPi(Booth):
                 elif io == "out":
                     m = GPIO.OUT
                 else:
-                    msg = (
-                        f"Incorrect value for IO mode for {label} on pin: {pin}. "
-                        "Expecting one of ['in', 'out']"
-                    )
                     self._reset_and_cleanup()
-                    self.except_and_log(ex_msg=msg)
+                    self.except_and_log(
+                        ex_msg=f"Invalid IO mode '{io}' for {label} on pin {pin}. "
+                        "Expected 'in' or 'out'."
+                    )
+                    continue
 
                 self.gpio.setup(pin, m)
-
                 if m == GPIO.OUT:
-                    # Set default state for outputs
                     self.gpio.output(pin, state)
 
         self.gpio.init = True
-        self.logger.info("Init Complete")
-
-        # Illuminate the 'GPIO Init" LED'
+        self.logger.info("GPIO init complete")
         self.toggle_led(label="gpio_init", on=True)
 
-    def _configure_pins(self):
-        """Handles setup of pins based on defaults and overrides passed in self.kwargs"""
-        # Set defaults
+    def setup_gpio_events(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Register GPIO falling-edge interrupts for all switch (button) pins.
+
+        Bridges the GPIO interrupt thread to the asyncio event loop via
+        call_soon_threadsafe, which is the only thread-safe way to schedule
+        work on a running event loop from a non-async thread.
+
+        bouncetime=200 ms provides hardware-level debounce.
+        """
+        for label, data in self.gpio.map.get("sw", {}).items():
+            pin = data["pin"]
+            GPIO.add_event_detect(
+                pin,
+                GPIO.FALLING,
+                bouncetime=500,
+                callback=lambda _, lbl=label: loop.call_soon_threadsafe(
+                    self.event_queue.put_nowait, lbl
+                ),
+            )
+        self.logger.info("GPIO event detection registered")
+
+    def _configure_pins(self) -> None:
+        """Populate gpio.map and gpio.pins from defaults, then apply kwargs overrides."""
         for label, use, pin, io, init_state in DEFAULT_PIN_MAP:
             if not self.gpio.map.get(use, None):
                 self.gpio.map[use] = dict()
             self.gpio.map[use][label] = {"pin": pin, "io": io, "init_state": init_state}
             self.gpio.pins[label] = pin
 
-        # Override defaults from input
-        for k, v in self.kwargs.items():
+        for k, v in list(self.kwargs.items()):
             for label, use, pin, io, init_state in DEFAULT_PIN_MAP:
                 if k == label:
                     self.gpio.map[use][label]["pin"] = int(v)
                     self.gpio.pins[label] = int(v)
-                    self.kwargs.pop(k, None)  # Remove from kwargs and throw away
+                    self.kwargs.pop(k, None)
 
-        # check for duplicate/conflicting pins
-        check = set(self.gpio.pins.values())
-        if len(check) != len(self.gpio.pins):
+        # Catch duplicate pins before hardware init causes silent failures
+        if len(set(self.gpio.pins.values())) != len(self.gpio.pins):
             self._reset_and_cleanup()
             self.except_and_log(ex_msg=f"Duplicate pin configured: {self.gpio.pins}")
 
-    def _reset_and_cleanup(self):
-        """Cleans up physical indicators and resets to basic state"""
+    def _reset_and_cleanup(self) -> None:
         self.gpio.init = False
         self._init_gpio()
-
         for led, values in self.gpio.map["led"].items():
-            pin = values["pin"]
-            state = values["init_state"]
-            self.gpio.output(pin, state)
+            self.gpio.output(values["pin"], values["init_state"])
 
-    def _get_pin_by_label(self, label: str = "") -> dict:
-        """Find the pin number based on the pin label"""
+    def _get_pin_by_label(self, label: str = "") -> int:
         if not label:
-            self.except_and_log(
-                ex_msg="'label' is a required argument for _get_pin_by_label()"
-            )
-
-        # Should only return 0 or 1 list items since label/k is unique
+            self.except_and_log(ex_msg="'label' is required for _get_pin_by_label()")
         pin = [v for k, v in self.gpio.pins.items() if label == k]
         if not pin:
             self.except_and_log(
-                ex_msg=f"Unable to find a pin for {label} in gpio.pins: {self.gpio.pins}"
+                ex_msg=f"No pin found for '{label}' in gpio.pins: {self.gpio.pins}"
             )
             return None
         return pin[0]
 
-    def _check_pin_use(
-        self, label: str = "", pin: int = 0, pintype: str = "led"
-    ) -> bool:
-        """Check that the label or pin is the correct type (use) and return True/False"""
-        # Check that atleast one of [label, pin] is set to non defaults
+    def _check_pin_use(self, label: str = "", pin: int = 0, pintype: str = "led") -> bool:
         if not label and not pin:
-            self.logger.warn("One of 'label' or 'pin' is required for _check_pin_use()")
+            self.logger.warning("One of 'label' or 'pin' is required for _check_pin_use()")
             return None
-
         if label and pin:
-            # Hard prefer label over pin when conflict
-            pin = 0
-
+            pin = 0  # label takes precedence
         pins = self.gpio.map[pintype]
-
         if label and pins.get(label, None):
             return True
         elif pin:
-            for label, values in pins.items():
+            for _, values in pins.items():
                 if pin == values["pin"]:
                     return True
-        else:
-            self.except_and_log(
-                ex_msg=f"Pin: {pin} not found to be configured as {pintype} in {self.gpio.map}"
-            )
-            return False  # Did not find a positive match for a {pintype}, assume False
+        self.except_and_log(
+            ex_msg=f"Pin {pin or label!r} not configured as {pintype} in {self.gpio.map}"
+        )
+        return False
 
-    def blink_led(self, label: str = "", pin: int = 0, speed=1) -> bool:
-        """blink an led once per speed (n seconds)"""
+    async def blink_led(self, label: str = "", pin: int = 0, speed: float = 1) -> bool:
+        """Blink an LED once at the given speed (seconds per cycle).
+
+        Replaces the former time.sleep() version — yields to the event loop
+        during the on/off intervals so other coroutines can run concurrently.
+        """
         if not self._check_pin_use(label=label, pin=pin):
             return False
         if label:
-            # effectively an override of anything supplied in pin
             pin = self._get_pin_by_label(label)
 
-        # max blinks = 10/sec
-        speed = speed if speed >= 0.1 else 0.1
+        speed = max(speed, 0.1)  # cap at 10 blinks/sec
         on = speed * 0.25
         off = speed * 0.75
 
-        # If LED is on, turn it off and pause for a moment
         if self.gpio.input(pin):
             self.gpio.output(pin, False)
-            time.sleep(off)
+            await asyncio.sleep(off)
 
-        # Blink
         self.gpio.output(pin, True)
-        time.sleep(on)
+        await asyncio.sleep(on)
         self.gpio.output(pin, False)
-        time.sleep(off)
+        await asyncio.sleep(off)
 
         return True
 
-    def toggle_led(self, label: str = "", pin: int = 0, on: bool = None):
-        """Toggle or set an LED to state
-        On: on=True
-        Off: on=False
-        Toggle: on=None
-        """
+    def toggle_led(self, label: str = "", pin: int = 0, on: bool = None) -> bool:
+        """Set an LED on (True), off (False), or toggled (None)."""
         if self._check_pin_use(label=label, pin=pin):
             if label:
                 pin = self._get_pin_by_label(label)
             if pin:
                 if on is None:
-                    # Invert current LED state
                     on = not self.gpio.input(pin)
-                self.gpio.output(pin, on)  # Set led to state
+                self.gpio.output(pin, on)
             return True
-        else:
-            return False
+        return False
 
     def check_sw_input(self, label: str = "", pin: int = 0) -> bool:
-        """Checks the status of a button or switch, returns True/False accordingly"""
+        """Directly read a switch pin state. Kept for diagnostic use.
+
+        In normal async operation, button events arrive via the queue populated
+        by setup_gpio_events(), so this method is rarely needed at runtime.
+        """
         if self._check_pin_use(label=label, pin=pin, pintype="sw"):
             if label:
                 pin = self._get_pin_by_label(label)
             if pin:
-                return bool(self.gpio.input(pin))  # Set led to state
+                return bool(self.gpio.input(pin))
 
-    def clear_leds(self):
+    def clear_leds(self) -> bool:
         for label, data in self.gpio.map["led"].items():
             self.toggle_led(label=label, on=data["init_state"])
-
         return True

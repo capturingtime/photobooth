@@ -1,13 +1,14 @@
-import board
-import neopixel
-import time
+import asyncio
 import os
 
 from random import randint
 from PIL import Image, ImageDraw, ImageFont
 
+import board
+import neopixel
+
 ABSPATH = os.path.dirname(__file__)
-RESOURCES = os.path.join(ABSPATH, 'resources')
+RESOURCES = os.path.join(ABSPATH, "resources")
 
 RED = (255, 0, 0)
 GREEN = (0, 255, 0)
@@ -18,25 +19,19 @@ CYAN = (0, 255, 255)
 ORANGE = (255, 128, 0)
 PINK = (255, 0, 128)
 WHITE = (255, 255, 255)
-OFF = (0, 0, 0)  # Not included in color lists
+OFF = (0, 0, 0)
 
 COLOR_LIST = ["RED", "GREEN", "BLUE", "YELLOW", "PURPLE", "CYAN", "ORANGE", "PINK", "WHITE"]
 COLOR_TUPLE_LIST = [RED, GREEN, BLUE, YELLOW, PURPLE, CYAN, ORANGE, PINK, WHITE]
 
-# The default brightness percent as a float (0.1 = 10%)
 DEFAULT_BRIGHTNESS = 0.1
-
 DEAFULT_ORDER = neopixel.GRB
 DEAFULT_PIN = board.D18
-
-DEFAULT_SPEED = 0.01
+DEFAULT_SPEED = 0.005
 
 
 def wheel(np, pos):
-    """ Input a value 0 to 255 to get a color value.
-        The colours are a transition r - g - b - back to r.
-        Source: Adafruit tutorials
-    """
+    """Map 0-255 position to an RGB rainbow color. Source: Adafruit tutorials."""
     if pos < 0 or pos > 255:
         r = g = b = 0
     elif pos < 85:
@@ -57,239 +52,189 @@ def wheel(np, pos):
 
 
 def getIndex(x, y, rows, cols):
-    """ This function, given a relative (x, y) coordinate, will return the corresponding pixel index
-        Example: 8x32 grid
-        Example:  0, 0 = 248 (top left pixel)
-                  0, 7 = 255 (bottom left pixel)
-                 31, 7 = 0   (bottom right pixel)
-                 31, 0 = 7   (top right pixel)
+    """Map (x, y) grid coordinate to NeoPixel snake-wired index.
 
-        NeoPixel Panels use a snake like numbering for the pixel index
-
-        248--247  xxx--007
-         |    |    |    |
-         |    |    |    |
-         |    |    |    |
-         |    |    |    |
-         |    |    |    |
-         |    |    |    |
-        255  240--xxx  000
+    NeoPixel panels use a serpentine (snake) wiring pattern. Column direction
+    alternates even/odd so this function inverts the y-axis on even columns.
     """
-    x = cols-x-1
+    x = cols - x - 1
     if x % 2 != 0:
-        return (x*rows)+y
+        return (x * rows) + y
     else:
-        return (x*rows)+(rows-1-y)
+        return (x * rows) + (rows - 1 - y)
 
 
-def valid_color_tuple(rgb_tuple, fix=False) -> (bool, tuple):
-    """ Check that color values are int and less than 256
-        Returns True/False, and either the original tuple, or a fixed one
+def valid_color_tuple(rgb_tuple, fix=False) -> tuple:
+    """Validate that an RGB tuple contains three ints in [0, 255].
+
+    Returns (valid: bool, tuple). When fix=True, clamps out-of-range values.
     """
     if not isinstance(rgb_tuple, tuple):
         raise ValueError("valid_color_tuple(rgb_tuple) must be type(tuple)")
-
-    elif len(rgb_tuple) < 3 or len(rgb_tuple) > 4:
-        raise ValueError(
-            "valid_color_tuple(rgb_tuple) should contain values for (R,G,B, or R,G,B,A)")
+    if len(rgb_tuple) < 3 or len(rgb_tuple) > 4:
+        raise ValueError("valid_color_tuple(rgb_tuple) should contain (R,G,B) or (R,G,B,A)")
 
     valid = True
     rgb_list = list(rgb_tuple)
-    for i in range(len(rgb_list)):
-        c = rgb_list[i]
+    for i, c in enumerate(rgb_list):
         if not isinstance(c, int):
-            raise ValueError(f"A non-int value was passed as a color value. Received: {c}")
+            raise ValueError(f"Non-int color value: {c}")
         if c > 255 or c < 0:
             valid = False
             if fix:
                 rgb_list[i] = 255 if c > 255 else 0
 
-    if valid:
-        return True, tuple(rgb_list)
-    else:
-        return False, tuple(rgb_list)
+    return valid, tuple(rgb_list)
 
 
-class Neopixel():
-    """ Loads a 'neopixel' for use.
-        Neopixel is typically a 5050 pixel (RGB)
-        controlled by the common ws281x library.
+class Neopixel:
+    """Controls a ws281x NeoPixel LED panel.
+
+    All animation methods are async coroutines — they yield control via
+    await asyncio.sleep() between frames so the event loop stays responsive.
+    Cancel an animation task with task.cancel() to stop it immediately.
+
+    np.show() writes to hardware synchronously but is fast (<1 ms); it is
+    called directly rather than offloaded to run_in_executor.
     """
-    def __init__(self,
-                 name: str = None,
-                 control=DEAFULT_PIN,
-                 rows: int = 8,
-                 cols: int = 32,
-                 brightness: float = DEFAULT_BRIGHTNESS,
-                 pixel_order: str = DEAFULT_ORDER,
-                 auto_write=False,
-                 **kwargs):
 
+    def __init__(
+        self,
+        name: str = None,
+        control=DEAFULT_PIN,
+        rows: int = 8,
+        cols: int = 32,
+        brightness: float = DEFAULT_BRIGHTNESS,
+        pixel_order: str = DEAFULT_ORDER,
+        auto_write: bool = False,
+        **kwargs,
+    ):
         if not name:
-            # Forces a unique name
             name = f"neopixel-{id(self)}"
-
         if not control:
             control = DEAFULT_PIN
 
         self.name = name
         self.rows = rows
         self.cols = cols
-        self.inputs = locals()
         self.num_px = rows * cols
 
-        # board_pin = getattr(board, f"D{pin}")
-
-        # Init
         self.np = neopixel.NeoPixel(
-            control, self.num_px, brightness=brightness, pixel_order=pixel_order,
-            auto_write=auto_write, **kwargs)
+            control,
+            self.num_px,
+            brightness=brightness,
+            pixel_order=pixel_order,
+            auto_write=auto_write,
+            **kwargs,
+        )
 
-        # TODO: Add logic that verifies the panel is working
+    async def rainbow_cycle(self, wait_ms: float = 1, iterations: int = 1) -> bool:
+        """Animate a rainbow that distributes uniformly across all pixels.
 
-    def rainbow_cycle(self, wait_ms=1, iterations=1):
-        """ Draw rainbow that uniformly distributes itself across all pixels.
-            Source: Adafruit tutorials
+        Runs for the given number of iterations and returns. Source: Adafruit tutorials.
         """
-        for j in range(255*iterations):
+        for j in range(255 * iterations):
             for i in range(self.np.n):
                 pixel_index = (i * 256 // self.np.n) + j
                 self.np[i] = wheel(self.np, pixel_index & 255)
             self.np.show()
-            time.sleep(wait_ms/1000.0)
-
+            await asyncio.sleep(wait_ms / 1000.0)
         return True
 
-    def color_chase(self, color: tuple = CYAN, wait: float = DEFAULT_SPEED):
-        """ Snake-like color chase from index 0 to -1
-            Source: Adafruit tutorials
-        """
+    async def color_chase(self, color: tuple = CYAN, wait: float = DEFAULT_SPEED) -> bool:
+        """Snake a single color from pixel 0 to the last pixel. Source: Adafruit tutorials."""
         for i in range(self.np.n):
             self.np[i] = color
-            time.sleep(wait)
             self.np.show()
+            await asyncio.sleep(wait)
         return True
 
-    def twinkle(self, wait: float = DEFAULT_SPEED, count: int = 10):
-        """ Randomly selects a pixel, and flashes it with a random color
-            Source: Adafruit tutorials
-        """
+    async def twinkle(self, wait: float = DEFAULT_SPEED, count: int = 10):
+        """Flash random pixels with random colors. Source: Adafruit tutorials."""
         last = None
         for _ in range(count):
-            c = randint(0, len(COLOR_TUPLE_LIST) - 1)  # Choose random color index
-            j = randint(0, self.np.n - 1)  # Choose random pixel
-
-            # Check that the pixel is off (different pixel)
+            c = randint(0, len(COLOR_TUPLE_LIST) - 1)
+            j = randint(0, self.np.n - 1)
             while self.np[j] == last:
-                j = randint(0, self.np.n - 1)  # Choose a different random pixel
+                j = randint(0, self.np.n - 1)
             last = j
-            self.np[j] = COLOR_TUPLE_LIST[c]  # Set pixel to color
+            self.np[j] = COLOR_TUPLE_LIST[c]
             self.np.show()
-            # Ramp up brightness
             for i in range(1, 5):
                 self.np.brightness = i / 5.0
                 self.np.show()
-                time.sleep(wait)
-
-            # Ramp down brightness
+                await asyncio.sleep(wait)
             for i in range(5, 0, -1):
                 self.np.brightness = i / 5.0
                 self.np[j] = OFF
                 self.np.show()
-                time.sleep(wait)
+                await asyncio.sleep(wait)
 
-    # TODO: Is reducing the current color of each pixel slowly to 0 a smoother execution?
-    def fade_out(self, duration: int = 1):
-        """ Fades out to OFF over the duration
-        """
+    async def fade_out(self, duration: int = 1) -> bool:
+        """Gradually reduce brightness to zero over duration seconds."""
         original_brightness = self.np.brightness
-
         step_level = 0.01
+        # Sleep per step chosen so the full fade takes ~duration seconds
         sleep_cycle = duration / (original_brightness / step_level)
 
         while self.np.brightness > 0:
-            # FIXME :
-            # Im not totally sure why, but...
-            # self.np.brightness -= step_level
-            # causes self.np.brightness of 0.1 to become 0.09000000000000001
-            # and i dont feel like figuring out why right now
+            # round() avoids floating-point drift (e.g. 0.1 - 0.01 = 0.09000000000000001)
             self.np.brightness = round(self.np.brightness - step_level, 2)
             self.np.show()
-            time.sleep(sleep_cycle)
+            await asyncio.sleep(sleep_cycle)
 
         self.np.fill(OFF)
         self.np.show()
-
-        # Reset brightness to original value now that pixels are OFF
         self.np.brightness = original_brightness
-
         return True
 
-    def draw_text(self, text: str, x_offset: int = 0,
-                  font_name: str = "Apple_II_mod.ttf", font_pt: int = 8) -> Image.Image:
-        """ Using PIL, draw text into an image to be scrolled
-        """
+    def draw_text(
+        self, text: str, x_offset: int = 0, font_name: str = "Apple_II_mod.ttf", font_pt: int = 8
+    ) -> Image.Image:
+        """Render text into a PIL Image sized for the panel (used by scroll)."""
         if self.rows < 5:
             raise ValueError(
-                f"Unable to scroll text on a board with rows < 5 px. Board Rows: {self.rows} ")
-
+                f"Cannot scroll on a board with rows < 5. Board rows: {self.rows}"
+            )
         text = str(text)
-
-        if not font_name.endswith('.ttf'):
-            font_name = f'{font_name}.ttf'
-
+        if not font_name.endswith(".ttf"):
+            font_name = f"{font_name}.ttf"
         if not os.path.exists(f"{RESOURCES}/{font_name}"):
             raise ValueError(
-                f"The font: '{font_name}' could not be found, please try a font in ./resources")
-
+                f"Font '{font_name}' not found. Place it in ./resources"
+            )
         font = ImageFont.truetype(f"{RESOURCES}/{font_name}", font_pt)
-        text_width, text_height = font.getsize(text)
-
-        # FIXME :
-        # For some reason we need to remove 1 px from the image width
-        # for it to clear smoothly at the end
-        # Instead of messing with the math, a workaround of clearing the panel
-        # after the scroll was added
-        image = Image.new('P', (text_width + (self.cols * 2), self.rows), 0)
+        text_width, _ = font.getsize(text)
+        # cols*2 padding on each side allows text to fully scroll on and off the panel
+        image = Image.new("P", (text_width + (self.cols * 2), self.rows), 0)
         draw = ImageDraw.Draw(image)
-
         draw.text((self.cols, x_offset), text, font=font, fill=255)
-
         return image
 
-    def scroll(self, text,
-               speed: float = DEFAULT_SPEED,
-               count=1,
-               offset_x: int = 0,
-               color: tuple((int, int, int)) = WHITE):
-        """ Scroll the input across the board
-        """
-
+    async def scroll(
+        self,
+        text,
+        speed: float = DEFAULT_SPEED,
+        count: int = 1,
+        offset_x: int = 0,
+        color: tuple = WHITE,
+    ) -> bool:
+        """Scroll text (or a pre-rendered PIL Image) across the panel."""
         rows = self.rows
         cols = self.cols
 
-        # Check if text is not a PIL.Image.Image object
         if not isinstance(text, Image.Image):
             text = self.draw_text(text)
 
         if not isinstance(speed, float):
-            raise ValueError(
-                f"Neopixel().scroll(speed) must be a float. Received: {speed} ({type(speed)})")
-
+            raise ValueError(f"scroll(speed) must be a float. Got: {speed} ({type(speed)})")
         if speed > 1:
-            raise ValueError(
-                f"Neopixel().scroll(speed) must be less than 1.0. Received: {speed}")
+            raise ValueError(f"scroll(speed) must be < 1.0. Got: {speed}")
 
-        # FIXME: Better way to do this part
-        # Reconstruct the original text width from
-        # image = Image.new('P', (text_width + (self.cols * 2) - 1, self.rows), 0)
-        # in self.draw_text()
         text_width = text.width - (self.cols * 2)
+        _, color = valid_color_tuple(color, fix=True)
 
-        valid, color = valid_color_tuple(color, fix=True)
-
-        # TODO: All this math should be revisited
-        for n in range(count):
+        for _ in range(count):
             i = text_width + cols
             while i > 0:
                 for x in range(cols):
@@ -302,76 +247,57 @@ class Neopixel():
                 if offset_x + cols > text.size[0]:
                     offset_x = 0
                 self.np.show()
-                time.sleep(speed)  # scrolling text speed
+                await asyncio.sleep(speed)
                 i -= 1
-        self.clear()  # Sometimes the last few px are visible, this just clears it off.
+        self.clear()
         return True
 
-    # TODO :
-    def flash(self, **kwargs):
-        """ Flash the input on the board n times
-            width is limited by width of panel
-        """
-        self.scroll(**kwargs)  # Temporary, will be replaced
+    async def flash(self, **kwargs):
+        """Flash text on the panel (placeholder — delegates to scroll)."""
+        await self.scroll(**kwargs)
 
-    # TODO :
-    def cycle_text(self, **kwargs):
-        """ given a list of strings, alternate randomly through them
-            using scroll, flash, etc.
-        """
-        self.scroll(**kwargs)  # Temporary, will be replaced
+    async def cycle_text(self, **kwargs):
+        """Cycle through text on the panel (placeholder — delegates to scroll)."""
+        await self.scroll(**kwargs)
 
-    def clear(self):
-        """ clear the panel and set all pixels to OFF
-        """
+    def clear(self) -> bool:
+        """Set all pixels to OFF immediately."""
         self.np.fill(OFF)
         self.np.show()
         return True
 
-    def fill(self, color=WHITE):
-        """ Fill the panel to a specific color
-            Accepts the following:
-            the color list in COLOR_LIST
-            tuple(int(r_val), int(g_val), int(b_val))
-            int(rgb_val)
-        """
-        # Error checking and data munging to resolve the 'color' input
+    def fill(self, color=WHITE) -> bool:
+        """Fill the panel with a solid color."""
         if isinstance(color, str):
             if color.upper() in COLOR_LIST:
                 color = globals()[color.upper()]
             else:
-                raise ValueError(
-                    f"The color name: {color} is not supported. "
-                    f"Please use one of {COLOR_LIST}")
+                raise ValueError(f"Color '{color}' not supported. Use one of {COLOR_LIST}")
         elif isinstance(color, tuple):
-            valid = valid_color_tuple(color)
-            if not valid:
-                raise ValueError(f"A non RGB color tuple was provided: {color}")
+            valid, color = valid_color_tuple(color)
         elif isinstance(color, int):
-            if color > 255 or color < 0:
-                raise ValueError(f"A value of '{color}' for color cannot be used for RGB, "
-                                 "please use a number in the range 0-255")
-            else:
-                color = (color, color, color)
+            if not 0 <= color <= 255:
+                raise ValueError(f"Int color {color} must be in range 0-255")
+            color = (color, color, color)
         self.np.fill(color)
         self.np.show()
         return True
 
-    def panel_test(self, extended=False):
-        """ Runs a panel test by cycling some various logic
-        """
-
-        self.scroll(text="Panel test in progress...", speed=0.001)
-        time.sleep(0.25)
+    async def panel_test(self, extended: bool = False) -> None:
+        """Run a sequence of animations to verify the panel is working."""
+        await self.scroll(text="Panel test in progress...", speed=0.001)
+        await asyncio.sleep(0.25)
         if extended:
-            self.scroll(text="ABCDEFGHIJKLMNOPQRSTUVQXYZ", color=RED, speed=0.001)
-            time.sleep(0.25)
-            self.scroll(text="abcdefghijklmnopqrstuvwxyz", color=GREEN, speed=0.001)
-            time.sleep(0.25)
-            self.scroll(text="1234567890!@#$%^&*(){}[]:;\"'~`+-\\/=_,.<>", color=BLUE, speed=0.001)
-            time.sleep(0.25)
+            await self.scroll(text="ABCDEFGHIJKLMNOPQRSTUVQXYZ", color=RED, speed=0.001)
+            await asyncio.sleep(0.25)
+            await self.scroll(text="abcdefghijklmnopqrstuvwxyz", color=GREEN, speed=0.001)
+            await asyncio.sleep(0.25)
+            await self.scroll(
+                text="1234567890!@#$%^&*(){}[]:;\"'~`+-\\/=_,.<>", color=BLUE, speed=0.001
+            )
+            await asyncio.sleep(0.25)
         for color in COLOR_LIST:
             self.fill(color)
-            time.sleep(.2)
-        self.rainbow_cycle(iterations=1)
-        self.fade_out(duration=1)
+            await asyncio.sleep(0.2)
+        await self.rainbow_cycle(iterations=1)
+        await self.fade_out(duration=1)

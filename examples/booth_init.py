@@ -1,98 +1,120 @@
 """
-This example assumes you have connected your Raspberry Pi 4 according to the diagram in the readme
+Photobooth asyncio entry point.
+
+Assumes Raspberry Pi 4B wired per the diagram in the README.
+Run with: python3 examples/booth_init.py
 """
 
+import asyncio
 import board
-import time
 
-from photobooth import RPi
+from photobooth import RPi, Uploader
 
-booth = RPi()
+S3_BUCKET = "public.capturingtimephoto.net"
 
-print("starting webserver")
-booth.start_web()  # stored in booth.web_server
 
-# Wait until webserver is started
-while not booth.check_web():
-    time.sleep(0.05)
-print("Webserver started")
-print("starting kiosk")
-booth.start_kiosk()  # Stored in booth.kiosk
+async def main():
+    loop = asyncio.get_running_loop()
 
-print("setting up components and running checks")
-booth.reset_last_shot()
+    booth = RPi()
+    uploader = Uploader(bucket_name=S3_BUCKET)
 
-# Setup panel and run a panel test as a thread (so we don't have to wait for it to finish)
-panel = booth.add_neopixel(name="main", control=board.D18)
-panel_test = booth.run_as_thread(panel.panel_test, executions=1, start=True)
+    # Start Django web server and wait until it responds
+    await booth.start_web()
+    while not booth.check_web():
+        await asyncio.sleep(0.1)
+    print("Web server ready")
 
-# Check network
-if booth.net_check_local():
-    booth.toggle_led(label="net_local", on=True)
+    await booth.start_kiosk()
+    booth.reset_last_shot()
 
-if booth.net_check_www():
-    booth.toggle_led(label="net_www", on=True)
+    # Add hardware components
+    panel = booth.add_neopixel(name="main", control=board.D18)
+    camera = booth.add_camera(name="main", model="Canon EOS 1100D")
+    printer = booth.add_printer(name="receipt", model="PBM-8350U")
 
-# Setup Camera and toggle LED
-camera = booth.add_camera(name="main", model="Canon EOS 1100D")
-booth.toggle_led(label="camera_rdy", on=True)
+    # Run panel test concurrently with network checks
+    panel_test = asyncio.create_task(panel.panel_test())
 
-# Setup Printer and toggle LED
-printer = booth.add_printer(name="receipt", model="PBM-8350U")
-booth.toggle_led(label="print_rdy", on=True)
+    if booth.net_check_local():
+        booth.toggle_led(label="net_local", on=True)
+    if booth.net_check_www():
+        booth.toggle_led(label="net_www", on=True)
 
-# Wait for panel test to finish
-while panel_test.is_alive():
-    time.sleep(0.05)
+    booth.toggle_led(label="camera_rdy", on=True)
+    booth.toggle_led(label="print_rdy", on=True)
 
-print("Booth is online and ready")
-# Booth is ready
-booth.toggle_led(label="shutter_rdy", on=True)
+    await panel_test
+    booth.toggle_led(label="shutter_rdy", on=True)
+    print("Booth is online and ready")
 
-attract = booth.run_as_thread(panel.scroll, start=True, speed=0.01,
-                              text="Press the capture button to begin!  ",)
+    # Register GPIO interrupts — buttons now push events into booth.event_queue
+    booth.setup_gpio_events(loop)
 
-# Run Booth
-while True:
-    time.sleep(0.05)  # if you dont have a short sleep, your CPU will catch fire. /s
+    # Attract loop animation runs as a background task
+    attract = asyncio.create_task(
+        panel.scroll(text="Press the capture button to begin!  ", count=999)
+    )
 
-    if booth.check_sw_input("capture"):
-        print("Capture button was pressed")
-        attract.stop_immediately()
-        panel.scroll(text="3...")
-        panel.scroll(text="2...")
-        panel.scroll(text="1...")
-        panel.flash(text="Smile! :D")
-        capture = booth.run_as_thread(target=camera.capture, executions=1, start=True)
-        wait = booth.run_as_thread(target=panel.twinkle, start=True, count=20)
-        while capture.is_alive():
-            time.sleep(0.01)
-        wait.stop_immediately()
-        panel.scroll(text="AWESOME!")
-        booth.copy_to_last_shot(camera.last_shot())
-        attract.restart()
-        booth.display_last_shot()
-    elif booth.check_sw_input("print"):
-        print("Print button was pressed")
-        now = time.time()
-        # Check if we had a recent print
-        try:
-            delta = int(now - last_print)  # noqa: F821
-        except Exception:
-            # There probably wasn't a last_print, so go ahead
-            pass
-        else:
-            # Only print if we haven't in the last 3 seconds (successive pushes)
-            if delta <= 3:
-                continue  # don't print
-        booth.run_as_thread(panel.flash, text="Printing...", executions=1, start=True)
-        while not camera.is_ready():
-            time.sleep(0.01)  # wait for camera to be ready after the shot.
-        printer.text(text=camera.last_shot())
-        printer.ln()
-        printer.qr(content="https://website.com", size=10)  # Could be where the photo was uploaded
-        printer.ln()
-        printer.text(text="Thank you for using our photobooth! "
-                          "Please visit us at http://website.net")
-        printer.cut()
-        last_print = time.time()
+    last_print_time: float = 0.0
+
+    # Main event loop — awaits button events instead of busy-polling GPIO
+    while True:
+        event = await booth.next_event()
+
+        if event == "capture":
+            print("Capture button pressed")
+            attract.cancel()
+
+            # Countdown
+            for label in ("3...", "2...", "1...", "Smile! :D"):
+                await panel.scroll(text=label)
+
+            # Capture and upload concurrently — twinkle during the wait
+            twinkle_task = asyncio.create_task(panel.twinkle(count=30))
+            image_path = await camera.capture_async()
+            twinkle_task.cancel()
+
+            booth.copy_to_last_shot(image_path)
+            await booth.display_last_shot()
+
+            # Upload to S3 and print receipt with QR code
+            url = await uploader.upload(image_path)
+            await loop.run_in_executor(None, _print_receipt, printer, url)
+
+            attract = asyncio.create_task(
+                panel.scroll(text="Press the capture button to begin!  ", count=999)
+            )
+
+        elif event == "print":
+            now = loop.time()
+            if now - last_print_time <= 3:
+                # Debounce successive print presses
+                continue
+            print("Print button pressed")
+            url = uploader.make_key(camera.last_shot())  # re-derive key; presign is async
+            presign_task = asyncio.create_task(uploader.presign(url))
+            flash_task = asyncio.create_task(panel.scroll(text="Printing...", count=1))
+            actual_url = await presign_task
+            await flash_task
+            await loop.run_in_executor(None, _print_receipt, printer, actual_url)
+            last_print_time = now
+
+        elif event == "last_shot":
+            await booth.display_last_shot()
+
+
+def _print_receipt(printer, url: str) -> None:
+    """Synchronous receipt print — runs in thread executor from async caller."""
+    printer.ln()
+    printer.text("Thank you for visiting Capturing Time Photography!\n")
+    printer.ln()
+    printer.text("Scan the QR code below to download your photo:\n")
+    printer.qr(content=url, size=10)
+    printer.ln()
+    printer.text("Visit us at capturingtimephoto.net\n")
+    printer.cut()
+
+
+if __name__ == "__main__":
+    asyncio.run(main())

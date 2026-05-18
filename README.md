@@ -1,59 +1,68 @@
-
-
 # Photobooth
-This package contains a simple photobooth framework written in Python3.7. This repository should be considered a Proof of Concept.
 
-Currently supports a RaspberryPi 4B controlling somenumber of NeoPixel (ws281x) panels/strips, Printers, Cameras, and status LEDs and switches connected to the GPIO.
+Raspberry Pi 4B photobooth framework for Capturing Time Photography. Supports
+single-shot and multi-shot strip modes with per-shot review, S3 upload, and ESC/POS
+receipt printing.
 
 ![Raspberry Pi Circuit Diagram](./img/RPi-4B-circuit-diagram.png "Raspberry Pi 4B")
 
-# Quickstart
-```shell
-sudo pip3 install -e git+https://github.com/namachieli/photobooth.git#egg=photobooth
-sudo python3
+## Hardware
+
+- Raspberry Pi 4B (Raspberry Pi OS, Python 3.7+)
+- Canon EOS DSLR via USB / gphoto2
+- NeoPixel (ws281x) LED panel — 8×32
+- PBM-8350U thermal receipt printer (ESC/POS)
+- Three momentary buttons on GPIO 23 (green), 24 (red), 25 (blue)
+
+## Package Structure
+
 ```
-```python
-import photobooth
-booth = photobooth.RPi()
-
-booth.start_web()
-booth.start_kiosk()
-
-# Check for supported camera models:
-# from photobooth.camera import supported_camera_list
-# supported_camera_list()
-# Or run "gphoto2 --list-cameras" in bash
-camera = booth.add_camera(name="main", model="Canon EOS 1100D")
-
-camera.capture()
-booth.copy_to_last_shot(camera.last_shot())  # copy the last shot to a location Django can access.
-booth.display_last_shot()
+photobooth/           ← installable Python package
+photobooth_web/       ← Django kiosk web app
 ```
 
-# Basic structure
-- `photobooth.booth.Booth()` - Contains all logic that is not controller (raspberrypi) specific, and loads portable components (neopixel, printer, camera, etc) on demand.
-  - `Booth().start_kiosk()` - Starts an xsession and runs the [kiosk](./photobooth/resources/kiosk.sh)
-- `photobooth.booth.Thread()` - Provides a wrapper class for running any function/method as a thread asynchronously. Ex: `panel_test = booth.run_as_thread(np.panel_test, executions=1, start=True)`
-- `photobooth.rpi.RPi()` - Contains all logic for the RaspberryPi Controller family.
-- `photobooth.arduino.Arduino()` - (FUTURE)
-- `photobooth.neopixelNeopixel()` - Contains generic logic spcific to just a ws281x compliant Neopixel component. (Portable)
-  - `Booth().add_neopixel()` - initializes and sets up a NeoPixel object
-- `photobooth.printer.Printer()` - Contains generic logic spcific to printers (Thermal, Photo, InkJet, etc). (Portable)
-  - `Booth().add_printer()` - initializes and sets up a Printer object
-- `photobooth.camera.Camera()` - Contains generic logic specific to Cameras. (Portable)
-  - `Booth().add_camera()` - initializes and sets up a camera object
-- `photobooth_web/` - A simple Django web environment for displaying resources.
-  - `Booth().start_web()` - Starts the webserver as a thread in the background
-  - `Booth().check_web()` - Provides status of the webserver (True/False)
-  - `Booth().stop_web()` - Stops the webserver thread running in the background
+See [ARCHITECTURE.md](./ARCHITECTURE.md) for a full component map, asyncio design,
+template system reference, capture flow diagrams, and GPIO wiring.
 
-New components, such as Printers, NeoPixel boards/strips, Cameras, etc can easily be added as a portable class defining how to use the component, and relevant logic in Booth() to init and add them.
+## Running the Booth
 
-Because controller logic ( RPi() ) doesn't care about components, and inherits 'Booth' level logic, new controllers can be easily added as needed (such as Arduino, or future RPi variants).
+The booth runs as a systemd service on the Pi:
 
-See [examples/booth_init.py](./examples/booth_init.py) for an example of how to use this library to run a photobooth using the reference circuit diagram, a Canon t7i (EOS 1100D), and a PBM-8350U Thermal Receipt Printer.
+```bash
+sudo systemctl start booth
+sudo systemctl status booth
+sudo journalctl -u booth -f          # or: tail -f /var/log/booth_stdout.log
+```
 
-Functions/Methods are documented in more detail in [/photobooth/README.md](./photobooth/README.md)
+The entry point is `/opt/run_booth.py` (deployed from
+`rpi_provisioning/booth_boot/resources/run_booth.py`). Top-of-file constants control
+the active camera, template, and S3 bucket — no code changes needed for routine
+configuration.
 
-# Contributions
-I am open to Issues and PRs, but I make no garuntee for support, acceptance, or implementation/Bug Fixing.
+## Development
+
+### Install (non-Pi, for tests only)
+
+```bash
+cd photobooth
+python3 -m venv env
+env/bin/pip install -e ".[dev]"
+env/bin/pytest tests/ -v
+```
+
+Hardware-dependent imports (`RPi.GPIO`, `neopixel`, `board`, `boto3`) are wrapped in
+`try/except ImportError` in `__init__.py` and are not required for running tests.
+
+### Django tests
+
+```bash
+cd photobooth/photobooth_web
+python3 manage.py test mainscreen
+```
+
+## Templates
+
+Compositor templates (PNG + JSON sidecar) live at `/opt/photobooth/templates/` on the
+Pi. Screen overlay PNGs live at `photobooth_web/mainscreen/static/img/`. See
+[ARCHITECTURE.md § Template System](./ARCHITECTURE.md) for the full schema and
+compositing pipeline.

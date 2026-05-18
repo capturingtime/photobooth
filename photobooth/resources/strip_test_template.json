@@ -1,0 +1,11 @@
+{
+  "name": "Strip Test Template",
+  "shot_count": 3,
+  "columns": 2,
+  "canvas": { "width": 600, "height": 1800 },
+  "slots": [
+    { "x": 31, "y":  91, "width": 538, "height": 358 },
+    { "x": 31, "y": 511, "width": 538, "height": 358 },
+    { "x": 31, "y": 931, "width": 538, "height": 358 }
+  ]
+}
