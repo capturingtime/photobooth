@@ -1,1 +1,3 @@
-include photobooth/*
+include photobooth/resources/*
+include photobooth_web/manage.py
+recursive-include photobooth_web *.py *.html *.css *.js *.png *.svg
