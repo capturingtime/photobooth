@@ -1,8 +1,11 @@
 import asyncio
+import logging
 
 from photobooth.booth import Booth
 
 import RPi.GPIO as GPIO
+
+logger = logging.getLogger(__name__)
 
 #   (label, use, gpio_bcm_pin, io, init_state)
 # Pass label=pin_number as a kwarg to RPi() to override any default pin.
@@ -14,9 +17,9 @@ DEFAULT_PIN_MAP = [
     ("print_rdy", "led", 19, "out", False),  # Pin 35
     ("shutter_rdy", "led", 26, "out", False),  # Pin 37
     ("printing", "led", 0, "out", False),  # Pin TBD
-    ("green", "sw", 23, "in", None),   # Pin 16 — keep / print / show last shot
-    ("red", "sw", 24, "in", None),     # Pin 18 — redo / start over
-    ("capture", "sw", 25, "in", None), # Pin 22 — shutter / continue
+    ("green", "sw", 23, "in", None),  # Pin 16 — keep / print / show last shot
+    ("red", "sw", 24, "in", None),  # Pin 18 — redo / start over
+    ("capture", "sw", 25, "in", None),  # Pin 22 — shutter / continue
     ("pixel", "ctl", 18, "out", False),  # Pin 12
 ]
 
@@ -39,7 +42,7 @@ class RPi(Booth):
 
     def _init_gpio(self) -> None:
         """Initialize GPIO pins from DEFAULT_PIN_MAP with optional overrides."""
-        self.logger.info("Initializing GPIO")
+        logger.info("Initializing GPIO")
 
         self.gpio = GPIO
         setattr(self.gpio, "init", False)
@@ -76,7 +79,7 @@ class RPi(Booth):
                     self.gpio.output(pin, state)
 
         self.gpio.init = True
-        self.logger.info("GPIO init complete")
+        logger.info("GPIO init complete")
         self.toggle_led(label="gpio_init", on=True)
 
     def setup_gpio_events(self, loop: asyncio.AbstractEventLoop) -> None:
@@ -88,17 +91,22 @@ class RPi(Booth):
 
         bouncetime=200 ms provides hardware-level debounce.
         """
+
+        def _on_press(channel, lbl=None, pin=None):
+            logger.debug("Button pressed: %s (pin %d)", lbl, pin)
+            loop.call_soon_threadsafe(self.event_queue.put_nowait, lbl)
+
         for label, data in self.gpio.map.get("sw", {}).items():
             pin = data["pin"]
             GPIO.add_event_detect(
                 pin,
                 GPIO.FALLING,
                 bouncetime=500,
-                callback=lambda _, lbl=label: loop.call_soon_threadsafe(
-                    self.event_queue.put_nowait, lbl
+                callback=lambda channel, lbl=label, pin=pin: _on_press(
+                    channel, lbl=lbl, pin=pin
                 ),
             )
-        self.logger.info("GPIO event detection registered")
+        logger.info("GPIO event detection registered")
 
     def _configure_pins(self) -> None:
         """Populate gpio.map and gpio.pins from defaults, then apply kwargs overrides."""
@@ -137,9 +145,11 @@ class RPi(Booth):
             return None
         return pin[0]
 
-    def _check_pin_use(self, label: str = "", pin: int = 0, pintype: str = "led") -> bool:
+    def _check_pin_use(
+        self, label: str = "", pin: int = 0, pintype: str = "led"
+    ) -> bool:
         if not label and not pin:
-            self.logger.warning("One of 'label' or 'pin' is required for _check_pin_use()")
+            logger.warning("One of 'label' or 'pin' is required for _check_pin_use()")
             return None
         if label and pin:
             pin = 0  # label takes precedence

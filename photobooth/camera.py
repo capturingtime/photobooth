@@ -5,13 +5,17 @@ gphoto2         2.5.27         gcc, popt(m), exif, no cdk, no aa, no jpeg, no re
 libgphoto2      2.5.22         all camlibs, gcc, ltdl, EXIF
 libgphoto2_port 0.12.0         iolibs: disk ptpip serial usb1 usbdiskdirect usbscsi
 """
+
 import asyncio
+import logging
 import os
 import re
 import subprocess
 
 from datetime import datetime
 from sys import platform
+
+logger = logging.getLogger(__name__)
 
 DEFAULT_CAPTURE_DIR = "/opt/captures"
 
@@ -21,7 +25,7 @@ def run_local_cmd(cmd: str):
     try:
         return subprocess.run(cmd, shell=True, capture_output=True)
     except Exception as err:
-        print(err)
+        logger.error("run_local_cmd failed: %s", err)
 
 
 def check_os():
@@ -42,7 +46,9 @@ def check_dir_rw_or_make(tgt_dir: str, mkdir_perms=0o766) -> bool:
         if not os.access(tgt_dir, os.W_OK) and not os.access(tgt_dir, os.R_OK):
             status = os.stat(tgt_dir)
             p = oct(status.st_mode)[-3:]
-            raise OSError(f"Target directory '{tgt_dir}' exists, but not RW. Permission: {p}")
+            raise OSError(
+                f"Target directory '{tgt_dir}' exists, but not RW. Permission: {p}"
+            )
         return True
     else:
         os.mkdir(tgt_dir)
@@ -160,7 +166,9 @@ class Camera:
         self.name = name
         self.model = model
         self.output_dir = (
-            output_dir if not output_dir.startswith("~") else os.path.expanduser(output_dir)
+            output_dir
+            if not output_dir.startswith("~")
+            else os.path.expanduser(output_dir)
         )
 
         # Plain state — no Manager() proxies needed in a single-process asyncio app
@@ -235,8 +243,17 @@ class Camera:
         if not self._ready:
             raise RuntimeError("Camera is not ready")
         self._ready = False
+        loop = asyncio.get_running_loop()
+        start = loop.time()
         pic = await capture_and_download_async(
             download_dir=self.output_dir, camera=self.model, port=self.addr
+        )
+        elapsed = loop.time() - start
+        logger.info(
+            "Camera capture: model=%s file=%s elapsed=%.2fs",
+            self.model,
+            pic,
+            elapsed,
         )
         self._captures.append(pic)
         self._last_shot = pic

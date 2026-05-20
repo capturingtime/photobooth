@@ -10,8 +10,7 @@ from photobooth.printer import Printer
 from photobooth.neopixel import Neopixel
 from photobooth.camera import Camera
 
-DEFAULT_LOG_LEVEL = logging.INFO
-DEFAULT_LOG_PATH = "/var/log/photobooth.log"
+logger = logging.getLogger(__name__)
 
 
 def connect(host: str = "http://google.com") -> bool:
@@ -40,7 +39,7 @@ def run_local_cmd(cmd: str):
     try:
         return subprocess.run(cmd, shell=True, capture_output=True)
     except Exception as err:
-        print(err)
+        logger.warning("run_local_cmd failed: %s", err)
 
 
 class Booth:
@@ -52,7 +51,6 @@ class Booth:
     def __init__(self, web_root: str = None, debug: bool = False):
         self.abspath = os.path.dirname(__file__)
         self.debug = debug
-        self._init_logger()
 
         if not web_root:
             parent_dir = str(pathlib.Path(__file__).resolve().parents[1])
@@ -114,7 +112,7 @@ class Booth:
         try:
             shutil.copy(last_shot, self._last_shot_tgt)
         except Exception as err:
-            self.logger.error(f"copy_to_last_shot failed: {err}")
+            logger.error("copy_to_last_shot failed: %s", err)
             return False
         return True
 
@@ -129,13 +127,17 @@ class Booth:
         import websockets
 
         try:
-            with urllib.request.urlopen("http://localhost:9222/json", timeout=1) as resp:
+            with urllib.request.urlopen(
+                "http://localhost:9222/json", timeout=1
+            ) as resp:
                 tabs = json.loads(resp.read())
             ws_url = tabs[0]["webSocketDebuggerUrl"]
             async with websockets.connect(ws_url) as ws:
-                await ws.send(json.dumps(
-                    {"id": 1, "method": "Page.navigate", "params": {"url": url}}
-                ))
+                await ws.send(
+                    json.dumps(
+                        {"id": 1, "method": "Page.navigate", "params": {"url": url}}
+                    )
+                )
                 await ws.recv()
         except Exception:
             await asyncio.create_subprocess_shell(
@@ -165,19 +167,7 @@ class Booth:
         try:
             raise ex_type(ex_msg)
         except Exception:
-            self.logger.exception(log)
-
-    def _init_logger(self) -> None:
-        self.logger = logging
-        level = logging.DEBUG if getattr(self, "debug", False) else DEFAULT_LOG_LEVEL
-        self.logger.basicConfig(
-            filename=DEFAULT_LOG_PATH,
-            filemode="a",
-            level=level,
-            datefmt="%Y-%m-%dT%H:%M:%S%z",
-            format="%(levelname)s:%(process)d:%(asctime)s:%(message)s",
-        )
-        self.logger.info("Logger initialized")
+            logger.exception(log)
 
     @staticmethod
     def _init_printer(model: str = None, name: str = None, **kwargs):

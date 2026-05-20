@@ -12,6 +12,10 @@ photobooth/           ← installable Python package
   photobooth/
     __init__.py       ← public API; hardware deps guarded by try/except ImportError
     booth.py          ← Booth base class (web server, kiosk, CDP display helpers)
+    booth_main.py     ← asyncio entry point — PhotoBooth class + main()
+                         (exposed as the photobooth-run console script)
+    booth_clear.py    ← shutdown helper — clears NeoPixel + LEDs
+                         (exposed as photobooth-clear; ExecStopPost target)
     rpi.py            ← RPi(Booth) — GPIO interrupt → asyncio event bridge
     camera.py         ← Camera — gphoto2 wrapper, async capture, per-camera startup config
     neopixel.py       ← Neopixel — ws281x panel animations (scroll, twinkle, rainbow…)
@@ -23,10 +27,6 @@ photobooth/           ← installable Python package
   photobooth_web/     ← Django web app (kiosk browser target)
     mainscreen/       ← views: attract, last_capture, single_final, series_final,
                          series_capture
-rpi_provisioning/
-  booth_boot/
-    resources/
-      run_booth.py    ← asyncio entry point — all runtime logic lives here
 ```
 
 ---
@@ -34,7 +34,7 @@ rpi_provisioning/
 ## Component Map
 
 ```
-PhotoBooth (run_booth.py)
+PhotoBooth (booth_main.py)
 │
 ├── RPi (rpi.py)                  ← extends Booth
 │   ├── setup_gpio_events()       GPIO interrupt → call_soon_threadsafe → asyncio.Queue
@@ -113,7 +113,7 @@ spawning a new Chromium process if the debugging port is unavailable (first boot
 ## Camera Startup Config
 
 Each camera model can require specific gphoto2 settings at startup. These are defined
-alongside `CAMERA_MODEL` in `run_booth.py` as a plain dict:
+alongside `CAMERA_MODEL` in `booth_main.py` as a plain dict:
 
 ```python
 CAMERA_MODEL = "Canon EOS 800D"
@@ -194,7 +194,7 @@ at 300 DPI).
 
 Template PNG is loaded once in `__init__` and reused across all `compose()` calls.
 
-### Mode selection (`run_booth.py` constants)
+### Mode selection (`booth_main.py` constants)
 
 | `ACTIVE_TEMPLATE` | `shot_count` | Mode |
 |---|---|---|
@@ -218,7 +218,7 @@ Template PNG is loaded once in `__init__` and reused across all `compose()` call
 
 Blue and green are interchangeable wherever green means "keep" or "print". Red is always
 the cancel / redo / start-over action. Constants `KEEP_BUTTON` and `REDO_BUTTON` in
-`run_booth.py` map logical roles to GPIO labels so wiring can be remapped without
+`booth_main.py` map logical roles to GPIO labels so wiring can be remapped without
 touching flow logic.
 
 ### Image compression

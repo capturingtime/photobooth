@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "photobooth"
-version = "0.2.1"
+version = "0.4.0.dev0"
 description = "Raspberry Pi photobooth controller for Capturing Time Photography"
 readme = "README.md"
 authors = [{ name = "Ian Price", email = "ian@capturingtimephoto.net" }]
 license = { text = "MIT" }
-requires-python = ">=3.8"
+requires-python = ">=3.7"
 dependencies = [
-    "ctp-utilities @ git+https://github.com/capturingtime/utilities.git@v0.2.1",
+    "ctp-utilities @ git+https://github.com/capturingtime/utilities.git@v0.4.0",
     "boto3>=1.26.0",
     "django>=3.2.3",
     "Pillow>=9.0.0",
@@ -32,6 +32,10 @@ dev = [
     "pytest-asyncio>=0.21.0",
     "pytest-mock>=3.10.0",
 ]
+
+[project.scripts]
+photobooth-run = "photobooth.booth_main:main"
+photobooth-clear = "photobooth.booth_clear:main"
 
 [tool.setuptools]
 include-package-data = true

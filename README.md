@@ -34,10 +34,26 @@ sudo systemctl status booth
 sudo journalctl -u booth -f          # or: tail -f /var/log/booth_stdout.log
 ```
 
-The entry point is `/opt/run_booth.py` (deployed from
-`rpi_provisioning/booth_boot/resources/run_booth.py`). Top-of-file constants control
-the active camera, template, and S3 bucket — no code changes needed for routine
-configuration.
+The entry point is the `photobooth-run` console script (installed at
+`/usr/local/bin/photobooth-run` by `pip install`). It's defined as a
+`[project.scripts]` entry in `pyproject.toml` and maps to `photobooth.booth_main:main`.
+Top-of-file constants in `photobooth/booth_main.py` control the active camera,
+template, and S3 bucket — no code changes needed for routine configuration.
+
+`photobooth-clear` (mapped to `photobooth.booth_clear:main`) is invoked from
+`ExecStopPost=` to dark the NeoPixel and LEDs on service stop.
+
+## Installing on a Pi
+
+```bash
+sudo pip3 install "git+https://github.com/capturingtime/photobooth.git@vX.Y.Z"
+```
+
+Pulls `ctp-utilities` as a transitive dependency from its matching git tag. The
+ESC/POS printer, NeoPixel, and GPIO deps are listed under `[project.optional-dependencies.rpi]`
+and aren't installed by default — `pip install ".[rpi]"` for hardware setups (the
+Pi already has the apt versions of `RPi.GPIO` and `Adafruit-Blinka` so this is
+rarely needed in practice).
 
 ## Development
 

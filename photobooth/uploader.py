@@ -1,11 +1,14 @@
 import asyncio
 import functools
+import logging
 import secrets
 from datetime import datetime
 from typing import Optional
 
 import boto3
 from botocore.config import Config
+
+logger = logging.getLogger(__name__)
 
 PRESIGN_EXPIRY_SECONDS: int = 604800  # 7 days
 
@@ -49,13 +52,27 @@ class Uploader:
     def make_key(image_path: str, prefix: str = "booth") -> str:
         """Build an S3 key from the local image path.
 
-        Format: <prefix>/<YYYYMMDD>/<filename>
-        Example: booth/20240915/20240915-12h30m00s-000001.jpg
+        Format: <prefix>/<YYYY>/<MM>/<DD>/<token>_<filename>
+        Example: booth/2024/09/15/aB3xK9p2_20240915-12h30m00s-000001.jpg
+
+        The token is the access control mechanism for public buckets — keys
+        are unguessable, so the URL itself is the capability. Callers that
+        need a stable key across reprints must stash the value returned here.
         """
         filename = image_path.rsplit("/", 1)[-1]
         now = datetime.now()
         token = secrets.token_urlsafe(8)
         return f"{prefix}/{now.strftime('%Y/%m/%d')}/{token}_{filename}"
+
+    def public_url(self, key: str) -> str:
+        """Build the customer-facing download URL for an uploaded object.
+
+        Assumes the bucket name is a public-read CNAME (the bucket name is
+        also the hostname, e.g. ``public.capturingtimephoto.net``). HTTP only;
+        HTTPS to a dotted S3 bucket name needs CloudFront in front because
+        S3's wildcard cert doesn't cover dotted hostnames.
+        """
+        return f"http://{self._bucket_name}/{key}"
 
     async def upload(self, image_path: str, key: Optional[str] = None) -> str:
         """Upload a local file to S3 and return a presigned download URL.
@@ -74,14 +91,30 @@ class Uploader:
         # at module import time (useful for tests that mock the uploader).
         from utilities.classes.path.file import File
 
-        loop = asyncio.get_running_loop()
-        await loop.run_in_executor(
-            None,
-            self._bucket.put_item,
+        logger.info(
+            "S3 upload starting: bucket=%s key=%s file=%s",
+            self._bucket_name,
             key,
-            File(image_path),
+            image_path,
         )
-        return await self.presign(key)
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(
+                None,
+                self._bucket.put_item,
+                key,
+                File(image_path),
+            )
+        except Exception as exc:
+            logger.error(
+                "S3 upload failed: bucket=%s key=%s — %s",
+                self._bucket_name,
+                key,
+                exc,
+            )
+            raise
+        logger.info("S3 upload complete: key=%s", key)
+        return self.public_url(key)
 
     async def presign(self, key: str, expires: int = PRESIGN_EXPIRY_SECONDS) -> str:
         """Generate a presigned GET URL for an existing S3 object.
@@ -103,4 +136,5 @@ class Uploader:
                 ExpiresIn=expires,
             ),
         )
+        logger.debug("S3 presign: key=%s expires=%ds", key, expires)
         return url
