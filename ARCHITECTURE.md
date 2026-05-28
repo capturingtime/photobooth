@@ -57,8 +57,10 @@ PhotoBooth (booth_main.py)
 │
 ├── PhotoStrip (strip.py)
 │   ├── __init__(loader, name)    load template PNG + JSON sidecar once at startup
-│   └── compose(shots, out)       center-crop shots into slots → overlay → optional
-│                                 column tiling → JPEG at output path
+│   ├── compose(shots, out)       center-crop shots into slots → overlay → JPEG
+│   │                             (single-strip output; one template application)
+│   └── expand_for_print(in, out) duplicate single strip across `columns` for the
+│                                 physical print medium; pass-through when columns ≤ 1
 │
 └── LocalTemplateLoader (template_loader.py)
     └── load(name)                read <base>/<name>/template.{png,json}
@@ -179,20 +181,41 @@ repo so templates can be swapped without a code deploy.
 }
 ```
 
-`shot_count` must equal `len(slots)`. `columns` defaults to 1; set to 2 for a 2×6 strip
-that tiles side-by-side to fill a 4×6 print (e.g. 600×1800 canvas → 1200×1800 output
-at 300 DPI).
+`shot_count` must equal `len(slots)`. `columns` defaults to 1 and is read only by
+`expand_for_print()` (see below) — `compose()` ignores it.
 
-### Compositor (`PhotoStrip.compose`)
+### Compositor — split between digital and print
+
+`PhotoStrip` provides two methods so the digital and print pipelines emit
+different artifacts from the same template:
+
+#### `compose(shots, output_path)` — single strip (digital path)
 
 1. Create a blank RGB canvas at canvas size.
 2. For each slot: open the corresponding shot, `_center_crop` it to slot dimensions
    (scale-to-fill + center-crop — no letterboxing), paste at `(slot["x"], slot["y"])`.
 3. Alpha-composite the RGBA template on top.
-4. If `columns > 1`, tile the finished strip horizontally into a wider canvas.
-5. Save as JPEG (quality 95) and return the path.
+4. Save as JPEG (quality 95) and return the path.
+
+Output is always one strip wide (canvas size). This is what gets uploaded to S3
+and displayed on the kiosk review screen — what the customer actually downloads.
 
 Template PNG is loaded once in `__init__` and reused across all `compose()` calls.
+
+#### `expand_for_print(input_path, output_path)` — column-tiled (print path)
+
+If `columns > 1`, duplicate the composed strip horizontally `columns` times onto
+a wider canvas (e.g. 600×1800 single strip → 1200×1800 print-ready output for
+columns=2 on 4×6 print medium). The operator cuts the duplicates apart after
+printing.
+
+If `columns <= 1`, no duplication is needed and the method is a pass-through:
+`input_path` is returned unchanged and no file is written. Callers can use the
+returned path unconditionally without branching on column count.
+
+Not currently invoked from `booth_main.py` — the receipt printer only prints a
+thermal QR receipt today. When a 4×6 photo-printer integration is added, the
+print path will call `expand_for_print()` before sending bytes to the printer.
 
 ### Mode selection (`booth_main.py` constants)
 
@@ -301,8 +324,23 @@ flowchart TD
 | Green | 23 | 16 | `"green"` |
 | Red | 24 | 18 | `"red"` |
 
-Bouncetime: 500 ms. GPIO events fire on `RISING` edge and are delivered to the asyncio
+Bouncetime: 500 ms. GPIO events fire on `FALLING` edge and are delivered to the asyncio
 queue via `call_soon_threadsafe`.
+
+### Electrical expectations
+
+The code assumes **active-low** button wiring: the GPIO line idles HIGH (pulled to 3.3V
+via an external resistor) and is shorted to GND when the button is pressed. A press
+produces a HIGH → LOW transition — the falling edge `add_event_detect` is registered
+for. `setup_gpio_events` does **not** enable the internal pull resistor (`pull_up_down`
+is not passed), so an external pull-up is mandatory; without one the line floats and
+the input state is undefined.
+
+Wiring topology, parts list, and cat5e pair assignment live in
+`rpi_provisioning/HARDWARE.md`. A defective idle-LOW wiring still in service on some
+booths (red and green buttons as of 2026-05-25) produces phantom triggers under EMI;
+see `BACKLOG.md` → "Spurious capture — EMI on GPIO signal line" for the diagnosis and
+migration plan.
 
 ---
 
@@ -321,16 +359,39 @@ Pass the loader instance to `PhotoStrip(loader=..., template_name=...)`.
 
 ## Running Tests
 
-### photobooth package (strip / template loader / compositor)
+### photobooth package
 
 ```bash
 cd photobooth
-env/bin/pytest tests/ -v
+python3 -m pytest                  # full suite
+python3 -m pytest tests/test_<x>   # one file
 ```
 
-Uses `tmp_path` fixtures and symlinks to real template resources in `photobooth/resources/`.
-No Pi hardware required; hardware deps (`RPi.GPIO`, `neopixel`, `board`) are guarded by
-`try/except ImportError` in `__init__.py`.
+96 tests across 9 files as of v0.4.1. No Pi hardware required at test time;
+hardware deps (`RPi.GPIO`, `neopixel`, `board`) are guarded by `try/except
+ImportError` in `__init__.py`. The few tests that need `board` (`test_booth_main_env`,
+`test_series_flow`) stub it via `sys.modules` before importing `booth_main`.
+
+| Test file | Covers |
+|---|---|
+| `test_strip.py` | `PhotoStrip` init / compose / center-crop; real template + sidecar integration; `expand_for_print` duplication and pass-through. |
+| `test_template_loader.py` (in `test_strip.py`) | `LocalTemplateLoader` happy / missing path / malformed JSON. |
+| `test_uploader.py` | `make_key` token uniqueness (reprint-bug regression), key format, `public_url` shape, `upload()` returns plain URL not presigned, error path re-raises. |
+| `test_logging_no_credentials.py` | Scans every log record (message + args) for `AKIA` / `X-Amz-Signature` / `Signature=` / etc. across upload + presign paths. Hard-blocks credential-leak regressions. |
+| `test_logging_config.py` | `setup_logging` idempotency, `BOOTH_LOG_LEVEL` handling (case-insensitive, bad-value fallback), unwritable log-file fallback. |
+| `test_booth_main_env.py` | Defaults + overrides for all 6 `BOOTH_*` constants. |
+| `test_env_example_consistency.py` | Cross-repo: every `BOOTH_*` key in `rpi_provisioning/booth_boot/resources/booth.env.example` is consumed by `booth_main` / `logging_config`, and vice versa. Catches doc-vs-code drift. |
+| `test_camera.py` | `run_local_cmd` (error path → `logger.error`), `_build_filename`, `check_gphoto2`, `check_dir_rw_or_make`, `_read_exif_datetime` (never-raises guarantee). |
+| `test_printer.py` | `PRINTER_MAP` resolution (default + PBM-8350U), escpos passthroughs, `ln()` edge cases. `python-escpos`-gated. |
+| `test_series_flow.py` | `PhotoBooth._series_capture_review` — all six scenarios (continue, start_over, undo-redo, undo-keep, re-affirm-keep, re-affirm-redo). Pins the buffer-after-re-review contract. |
+
+Hardware-tied "tests" (`tests/blink_thread.py`, `cntdwn_np_test.py`, etc.) are
+manual scripts run on the live booth; pytest ignores them via `addopts =
+"--ignore=tests/cntdwn_np_test.py"`.
+
+`tests/test_uploader.py` and `tests/test_logging_no_credentials.py` use
+`pytest.importorskip("utilities")` — install ctp-utilities editably to run
+locally: `pip3 install --user -e ../utilities`.
 
 ### Django web app (views / URLs)
 

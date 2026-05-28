@@ -5,11 +5,11 @@
     <style>
         body { background-color: black; margin: 0; padding: 0; }
         .frame { position: relative; width: 100vw; height: 100vh; visibility: hidden; }
-        .photo {
+        .background {
             position: absolute; width: 100%; height: 100%;
-            object-fit: contain;
+            object-fit: cover;
         }
-        .overlay {
+        .photo {
             position: absolute; width: 100%; height: 100%;
             object-fit: contain;
         }
@@ -17,18 +17,18 @@
 </head>
 <body>
   <div class="frame" id="frame">
+    <img class="background" id="background" src="{% static "img/series_final.png" %}">
     <img class="photo" id="photo">
-    <img class="overlay" id="overlay" src="{% static "img/series_final.png" %}">
   </div>
   <script>
     var ph = document.getElementById('photo');
-    var ov = document.getElementById('overlay');
+    var bg = document.getElementById('background');
     var fr = document.getElementById('frame');
-    function reveal() { if (ph.complete && ov.complete) fr.style.visibility = 'visible'; }
+    function reveal() { if (ph.complete && bg.complete) fr.style.visibility = 'visible'; }
     ph.onload = reveal;
-    ov.onload = reveal;
+    bg.onload = reveal;
     ph.src = "{% static 'img/last.jpg' %}?" + Date.now();
-    if (ph.complete && ov.complete) reveal();
+    if (ph.complete && bg.complete) reveal();
   </script>
 </body>
 </html>

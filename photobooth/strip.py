@@ -23,7 +23,14 @@ class PhotoStrip:
         self.template = Image.open(data["template_path"]).convert("RGBA")
 
     def compose(self, shots: list, output_path: str) -> str:
-        """Composite shots onto the template and save as JPEG.
+        """Composite shots onto the template and save as a single strip JPEG.
+
+        The output is always one strip wide (``canvas_size`` from the template
+        sidecar). The ``columns`` setting is *not* applied here — call
+        ``expand_for_print()`` separately when a physical print needs the
+        side-by-side layout. This way the file uploaded to S3 and shown on
+        the kiosk is the single-strip form (one copy per capture), which is
+        what the customer actually downloads.
 
         Runs synchronously — call via loop.run_in_executor() from async contexts.
 
@@ -44,14 +51,36 @@ class PhotoStrip:
             strip.paste(photo, (slot["x"], slot["y"]))
         strip.paste(self.template, (0, 0), mask=self.template)
 
-        if self.columns > 1:
-            w, h = self.canvas_size
-            canvas = Image.new("RGB", (w * self.columns, h), color=(255, 255, 255))
-            for col in range(self.columns):
-                canvas.paste(strip, (col * w, 0))
-        else:
-            canvas = strip
+        strip.save(output_path, "JPEG", quality=95)
+        return output_path
 
+    def expand_for_print(self, input_path: str, output_path: str) -> str:
+        """Duplicate a composed strip side-by-side for the physical printer.
+
+        A 2×6 strip duplicated columns=2 yields a 4×6 print sheet; the
+        operator cuts the two identical strips apart after printing. The
+        digital copy (uploaded + displayed) stays single-strip — see
+        ``compose()``.
+
+        Pass-through when ``columns <= 1``: there's nothing to duplicate, so
+        ``input_path`` is returned unchanged and no file is written. Callers
+        can always use the returned path without branching on column count.
+
+        Args:
+            input_path: A strip JPEG produced by ``compose()``.
+            output_path: Destination for the expanded print-ready JPEG.
+
+        Returns:
+            ``input_path`` if columns <= 1, otherwise ``output_path``.
+        """
+        if self.columns <= 1:
+            return input_path
+
+        strip = Image.open(input_path).convert("RGB")
+        w, h = strip.size
+        canvas = Image.new("RGB", (w * self.columns, h), color=(255, 255, 255))
+        for col in range(self.columns):
+            canvas.paste(strip, (col * w, 0))
         canvas.save(output_path, "JPEG", quality=95)
         return output_path
 

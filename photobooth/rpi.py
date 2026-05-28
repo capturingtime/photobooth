@@ -93,7 +93,15 @@ class RPi(Booth):
         """
 
         def _on_press(channel, lbl=None, pin=None):
-            logger.debug("Button pressed: %s (pin %d)", lbl, pin)
+            # queue_depth_before is the forensic signal for the spurious-capture
+            # investigation: if a single physical press produces multiple ISR
+            # firings, the depth will climb past 0 on the second+ entry. A
+            # clean press is always depth=0 (assuming the main loop is keeping
+            # up). See BACKLOG.md → "Camera sleep triggers a spurious capture".
+            logger.debug(
+                "Button event: label=%s pin=%d queue_depth_before=%d",
+                lbl, pin, self.event_queue.qsize(),
+            )
             loop.call_soon_threadsafe(self.event_queue.put_nowait, lbl)
 
         for label, data in self.gpio.map.get("sw", {}).items():

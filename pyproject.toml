@@ -4,14 +4,14 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "photobooth"
-version = "0.4.0.dev0"
+version = "0.4.1"
 description = "Raspberry Pi photobooth controller for Capturing Time Photography"
 readme = "README.md"
 authors = [{ name = "Ian Price", email = "ian@capturingtimephoto.net" }]
 license = { text = "MIT" }
 requires-python = ">=3.7"
 dependencies = [
-    "ctp-utilities @ git+https://github.com/capturingtime/utilities.git@v0.4.0",
+    "ctp-utilities @ git+https://github.com/capturingtime/utilities.git@v0.4.1",
     "boto3>=1.26.0",
     "django>=3.2.3",
     "Pillow>=9.0.0",

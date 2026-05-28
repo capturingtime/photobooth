@@ -249,13 +249,46 @@ class Camera:
             download_dir=self.output_dir, camera=self.model, port=self.addr
         )
         elapsed = loop.time() - start
+
+        # Forensic detail for the spurious-capture investigation:
+        # * ``size`` < ~100 KB or -1 ⇒ gphoto2 returned 0 but no real image
+        #   landed on disk (likely camera-buffer or wakeup-frame artifact).
+        # * ``exif_dt`` significantly older than wall-clock ⇒ stale frame
+        #   pulled from the camera buffer rather than a fresh shutter.
+        # See BACKLOG.md → "Camera sleep triggers a spurious capture".
+        size = os.path.getsize(pic) if os.path.exists(pic) else -1
+        exif_dt = _read_exif_datetime(pic) if size > 0 else None
         logger.info(
-            "Camera capture: model=%s file=%s elapsed=%.2fs",
+            "Camera capture: model=%s file=%s size=%d elapsed=%.2fs exif_dt=%s",
             self.model,
             pic,
+            size,
             elapsed,
+            exif_dt,
         )
+
         self._captures.append(pic)
         self._last_shot = pic
         self._ready = True
         return pic
+
+
+def _read_exif_datetime(path: str):
+    """Return EXIF DateTimeOriginal as a string, or None on any failure.
+
+    Used only for diagnostic logging — must never raise, never block, and
+    never affect the capture return value. PIL is imported lazily so the
+    module remains importable on systems without Pillow.
+    """
+    try:
+        from PIL import ExifTags, Image
+
+        with Image.open(path) as img:
+            exif = img._getexif() or {}
+        tag_id = next(
+            (k for k, v in ExifTags.TAGS.items() if v == "DateTimeOriginal"),
+            None,
+        )
+        return exif.get(tag_id) if tag_id is not None else None
+    except Exception:
+        return None

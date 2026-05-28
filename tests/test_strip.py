@@ -383,7 +383,61 @@ class TestRealTemplate:
         out = str(tmp_path / "real_result.jpg")
         real_strip.compose(real_shots, out)
         result = Image.open(out)
+        # compose() always emits single-strip; the column-duplication step
+        # for physical printing lives in expand_for_print(), exercised in
+        # TestExpandForPrint below.
         assert result.size == (600, 1800)
+
+    def test_expand_for_print_doubles_strip_for_columns_2(
+        self, real_strip, real_shots, tmp_path
+    ):
+        """The real sidecar has columns=2 — expand_for_print produces 1200×1800."""
+        single = str(tmp_path / "single.jpg")
+        real_strip.compose(real_shots, single)
+        printable = str(tmp_path / "print.jpg")
+
+        out = real_strip.expand_for_print(single, printable)
+
+        assert out == printable
+        assert Image.open(out).size == (1200, 1800)
+
+    def test_expand_for_print_passthrough_when_columns_le_1(
+        self, strip, shots, tmp_path
+    ):
+        """columns=1 (or absent) → no expansion, input path returned unchanged.
+
+        The default sidecar fixture has no ``columns`` key, so columns defaults
+        to 1. The real_strip fixture (production template) uses columns=2.
+        """
+        assert strip.columns == 1
+
+        single = str(tmp_path / "single.jpg")
+        strip.compose(shots, single)
+
+        out = strip.expand_for_print(single, str(tmp_path / "should_not_exist.jpg"))
+
+        assert out == single, "passthrough must return input_path unchanged"
+        assert not (tmp_path / "should_not_exist.jpg").exists(), (
+            "no output file should be written when columns <= 1"
+        )
+
+    def test_expand_for_print_left_and_right_halves_are_identical(
+        self, real_strip, real_shots, tmp_path
+    ):
+        single = str(tmp_path / "single.jpg")
+        real_strip.compose(real_shots, single)
+        printable = str(tmp_path / "print.jpg")
+        real_strip.expand_for_print(single, printable)
+
+        full = Image.open(printable).convert("RGB")
+        left = full.crop((0, 0, 600, 1800))
+        right = full.crop((600, 0, 1200, 1800))
+        # JPEG re-encoding can introduce subpixel differences; sample a
+        # handful of points to verify the duplication, not a bit-for-bit match.
+        for x, y in [(100, 100), (300, 900), (500, 1700)]:
+            assert left.getpixel((x, y)) == right.getpixel((x, y)), (
+                f"left/right halves differ at ({x},{y})"
+            )
 
     def test_compose_slot_colors_visible(self, real_strip, real_shots, tmp_path):
         """Each photo's dominant color should be visible inside its slot."""

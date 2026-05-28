@@ -125,6 +125,12 @@ class PhotoBooth:
 
         while True:
             event = await self.rpi.next_event()
+            # Forensic trail for the spurious-capture investigation: every
+            # event dispatched by the main loop is recorded here, regardless
+            # of which branch handles it below. Pair with the "Button event:"
+            # line emitted in rpi._on_press to correlate GPIO arrival vs
+            # main-loop processing latency.
+            logger.debug("Main loop event: %s", event)
 
             if event == "capture":
                 is_series = self.strip is not None and self.strip.shot_count > 1
@@ -388,14 +394,13 @@ class PhotoBooth:
             decision = await self._review_shot(image_path, series_mode=True)
 
             if decision == "redo":
-                series_decision = await self._series_capture_review(shots)
+                series_decision = await self._series_capture_review(
+                    shots, last_decided=image_path
+                )
                 if series_decision == "start_over":
                     logger.info("Series cancelled by user (start over)")
                     return None
-                if series_decision == "redo_last":
-                    logger.info("Series redo last shot")
-                    shots.pop()
-                continue  # retake current slot (or previous if redo_last)
+                continue  # retake current slot (or advance, if shots was mutated)
 
             shots.append(image_path)
 
@@ -403,13 +408,12 @@ class PhotoBooth:
                 continue
 
             # decision == "keep" — go to between-shots review page
-            series_decision = await self._series_capture_review(shots)
+            series_decision = await self._series_capture_review(
+                shots, last_decided=image_path
+            )
             if series_decision == "start_over":
                 logger.info("Series cancelled by user (start over)")
                 return None
-            if series_decision == "redo_last":
-                logger.info("Series redo last shot")
-                shots.pop()
 
         strip_path = (
             f"{BOOTH_DIR}/strip_{datetime.now().strftime('%Y%m%d-%Hh%Mm%Ss')}.jpg"
@@ -475,24 +479,66 @@ class PhotoBooth:
         logger.debug("Shot review decision: %s (button=%s)", result, decision)
         return result
 
-    async def _series_capture_review(self, shots: list) -> str:
-        """Between-shots review page. Returns "continue", "start_over", or "redo_last"."""
-        await self.rpi.display_url(SERIES_CAPTURE_URL)
-        await self._flush_events()
+    async def _series_capture_review(self, shots: list, last_decided: str) -> str:
+        """Between-shots review page.
+
+        Returns "continue" (user pressed CAPTURE to take next shot) or
+        "start_over" (user pressed REDO_BUTTON to cancel the series).
+
+        ``last_decided`` is the path of the shot whose decision (keep or redo)
+        brought the user to this page. When the user presses KEEP_BUTTON
+        ("show last shot"), that shot is re-reviewed; the re-review's outcome
+        may mutate ``shots`` in place:
+
+        - Re-review returns "keep" on a shot NOT in ``shots`` (i.e. the
+          original decision was redo): the shot is appended — the user
+          changed their mind and is keeping it after all.
+        - Re-review returns "redo" on a shot IN ``shots`` (i.e. the
+          original decision was keep): the shot is removed — the user
+          changed their mind and is redoing it after all.
+        - Re-affirming the original decision is a no-op.
+
+        After any re-review, the page is re-displayed and we wait for the
+        next BLUE/GREEN/RED. This provides a buffer between a decision
+        change and the countdown for the next shot.
+        """
         while True:
-            event = await self.rpi.next_event()
-            if event == "capture":
-                return "continue"
-            if event == REDO_BUTTON:
-                return "start_over"
-            if event == KEEP_BUTTON:
-                if not shots:
-                    continue
-                decision = await self._review_shot(shots[-1], series_mode=False)
-                if decision == "redo":
-                    return "redo_last"
-                await self.rpi.display_url(SERIES_CAPTURE_URL)
-                await self._flush_events()
+            await self.rpi.display_url(SERIES_CAPTURE_URL)
+            await self._flush_events()
+            scroll = asyncio.create_task(
+                self.panel.scroll(
+                    text="Press the big blue button to continue!  ",
+                    speed=0.005,
+                    count=999,
+                )
+            )
+            try:
+                while True:
+                    event = await self.rpi.next_event()
+                    if event == "capture":
+                        return "continue"
+                    if event == REDO_BUTTON:
+                        return "start_over"
+                    if event == KEEP_BUTTON:
+                        if not last_decided:
+                            continue
+                        scroll.cancel()
+                        decision = await self._review_shot(
+                            last_decided, series_mode=False
+                        )
+                        if decision == "keep" and last_decided not in shots:
+                            logger.info(
+                                "Series undo redo: keeping %s", last_decided
+                            )
+                            shots.append(last_decided)
+                        elif decision == "redo" and last_decided in shots:
+                            logger.info(
+                                "Series undo keep: redoing %s", last_decided
+                            )
+                            shots.remove(last_decided)
+                        break  # re-show series_capture page + reset scroll
+            finally:
+                scroll.cancel()
 
     # ------------------------------------------------------------------
     # Receipt printer
