@@ -285,3 +285,73 @@ CAMERA_STARTUP_CONFIG = {
 Trade-off: sensor stays warm during long idle days; potentially
 shortens shutter life on a multi-day event. Worth measuring before
 committing.
+
+---
+
+## Canon Selphy CP1500 photo printer integration + `Printer` → `ThermalPrinter` rename
+
+### Why
+
+The booth's only "printer" today is a PBM-8350U thermal device that
+prints a marketing receipt with a QR code linking to the S3-hosted
+photo — the customer never walks away with a paper print of the actual
+shot. Adding a Canon Selphy CP1500 (USB dye-sub, 4×6) makes the booth a
+real "leave with a print in your hand" experience without removing the
+receipt's marketing role.
+
+`PhotoStrip.expand_for_print()` already exists for exactly this — it
+duplicates a 2×6 strip into a 4×6 sheet — but nothing in `booth_main.py`
+calls it today.
+
+### Behavior
+
+- **Add `PhotoPrinter` alongside `ThermalPrinter`.** Both run per
+  capture. Receipt + photo are independent `run_in_executor` calls; a
+  failure on one printer never blocks the other or the return to
+  attract.
+- **Rename `Printer` → `ThermalPrinter`** at the same time. The
+  existing class is opinionated to ESC/POS / thermal hardware
+  (`escpos.printer.Usb`, `text` / `cut` / `qr` / `barcode`); the bare
+  name became misleading once a second printer joined the design. Rename
+  scope: class, module file (`printer.py` → `thermal_printer.py`),
+  `PRINTER_MAP` → `THERMAL_PRINTER_MAP`, `Booth.add_printer` →
+  `Booth.add_thermal_printer`, `tests/test_printer.py` →
+  `tests/test_thermal_printer.py`, and all call sites in
+  `booth_main.py`. No behavioral change.
+- **CUPS via `lp`, not `pycups`.** `PhotoPrinter` shells out to the
+  system `lp` binary via `subprocess.run`. No C-extension build on
+  Buster/Py3.7 (where `rawpy` already broke), and CUPS is already the
+  integration surface either way.
+- **Wire `expand_for_print` into the flow.** Currently unused; called
+  immediately after `compose()` when a `PhotoPrinter` is online. The
+  single-strip output stays the source of truth for the S3 upload and
+  the kiosk review screen.
+
+### Risks
+
+1. **Buster Gutenprint is too old for the CP1500.** Buster ships
+   Gutenprint 5.3.3 (Sept 2018); the CP1500 hardware shipped Sept 2022.
+   Verify before starting code by SSHing to the live booth and running
+   `lpinfo --make-and-model "Canon CP1500" -m | grep -i cp1500`. If
+   empty, build Solomon Peachy's standalone `selphy_print` from source
+   (https://git.shaftnet.org/cgit/selphy_print.git/) — small C build,
+   no Python deps, registers as a CUPS backend.
+2. **Pi3-class CPU on the live booth.** Dye-sub data streams are
+   ~10–20 MB per 4×6; CUPS rasterization can take 5–15 s on older ARM.
+   Mitigation: fire `_do_photo_print` early, in parallel with upload.
+3. **`expand_for_print` has never run in production.** If any active
+   template has `columns > 1` and the geometry was authored without
+   testing the 4×6 output, the first print may have unexpected margins.
+   Mitigation: dry-run with `lp -o job-hold-until=indefinite` during
+   initial bring-up.
+4. **Ribbon/paper exhaustion is silent in the UI.** CP1500 has a
+   fixed-count consumable. Out of scope for the initial PR; worth a
+   follow-up that polls `lpstat -W not-completed` and lights a panel
+   LED on stall.
+
+### Reference
+
+Full plan including file-by-file change list lives at
+`/home/ian/.claude/plans/how-easily-could-we-zazzy-whistle.md`. The
+two-class rationale and the CUPS-via-`lp` decision are captured in
+ARCHITECTURE.md under "Printers".

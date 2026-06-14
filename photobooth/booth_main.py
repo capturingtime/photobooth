@@ -523,6 +523,7 @@ class PhotoBooth:
                         if not last_decided:
                             continue
                         scroll.cancel()
+                        self.panel.clear()
                         decision = await self._review_shot(
                             last_decided, series_mode=False
                         )

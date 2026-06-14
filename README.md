@@ -1,8 +1,10 @@
 # Photobooth
 
 Raspberry Pi 4B photobooth framework for Capturing Time Photography. Supports
-single-shot and multi-shot strip modes with per-shot review, S3 upload, and ESC/POS
-receipt printing.
+single-shot and multi-shot strip modes with per-shot review, S3 upload, ESC/POS
+receipt printing, and (planned) Canon Selphy CP1500 4×6 dye-sub photo printing
+via CUPS. See ARCHITECTURE.md → "Printers" and BACKLOG.md for the photo-printer
+workstream.
 
 ![Raspberry Pi Circuit Diagram](./img/RPi-4B-circuit-diagram.png "Raspberry Pi 4B")
 
@@ -11,7 +13,9 @@ receipt printing.
 - Raspberry Pi 4B (Raspberry Pi OS, Python 3.7+)
 - Canon EOS DSLR via USB / gphoto2
 - NeoPixel (ws281x) LED panel — 8×32
-- PBM-8350U thermal receipt printer (ESC/POS)
+- PBM-8350U thermal receipt printer (ESC/POS) — driven by `ThermalPrinter`
+- Canon Selphy CP1500 dye-sub photo printer (USB, CUPS + Gutenprint) — driven
+  by `PhotoPrinter` (planned; see BACKLOG.md)
 - Three momentary buttons on GPIO 23 (green), 24 (red), 25 (blue)
 
 ## Package Structure
