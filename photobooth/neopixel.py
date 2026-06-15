@@ -252,6 +252,30 @@ class Neopixel:
         self.clear()
         return True
 
+    async def scroll_for_duration(
+        self,
+        text,
+        duration_s: float,
+        color: tuple = WHITE,
+        offset_x: int = 0,
+    ) -> bool:
+        """Scroll text once so the full pass takes ~duration_s seconds.
+
+        Derives per-frame ``speed`` from the rendered text width so the caller
+        specifies the target wall-clock duration rather than tuning ms-per-frame
+        for each label. Pre-renders the image once and passes it to ``scroll``
+        to avoid a second draw_text() pass.
+        """
+        if not isinstance(text, Image.Image):
+            text = self.draw_text(text)
+        # Frame count matches scroll()'s inner loop: text_width + cols where
+        # text_width = image.width - (cols * 2). Simplifies to image.width - cols.
+        frames = text.width - self.cols
+        speed = duration_s / frames if frames > 0 else DEFAULT_SPEED
+        return await self.scroll(
+            text=text, speed=speed, count=1, offset_x=offset_x, color=color
+        )
+
     async def flash(self, **kwargs):
         """Flash text on the panel (placeholder — delegates to scroll)."""
         await self.scroll(**kwargs)

@@ -427,12 +427,25 @@ class PhotoBooth:
     # ------------------------------------------------------------------
 
     async def _take_one_shot(self) -> str:
-        """Run the countdown and capture one image."""
-        for label in ("3...", "2...", "1...", "Smile! :D"):
-            await self.panel.scroll(text=label, speed=0.001)
-        twinkle_task = asyncio.create_task(self.panel.twinkle(count=30))
-        image_path = await self.camera.capture_async()
-        twinkle_task.cancel()
+        """Run the countdown and capture one image.
+
+        Timing target (v0.5.0 Phase 1): button-press → shutter ≈ 2.0s.
+        3/2/1 each scroll for 0.4s (1.2s total). Capture is then dispatched
+        and ``Smile! :D`` scrolls in parallel for 0.8s. If the camera's real
+        gphoto2 latency extends past the Smile! scroll, twinkle runs as a
+        visual fallback until the capture task resolves.
+        """
+        await self.panel.scroll_for_duration(text="3...", duration_s=0.4)
+        await self.panel.scroll_for_duration(text="2...", duration_s=0.4)
+        await self.panel.scroll_for_duration(text="1...", duration_s=0.4)
+        capture_task = asyncio.create_task(self.camera.capture_async())
+        await self.panel.scroll_for_duration(text="Smile! :D", duration_s=0.8)
+        twinkle_task = None
+        if not capture_task.done():
+            twinkle_task = asyncio.create_task(self.panel.twinkle(count=30))
+        image_path = await capture_task
+        if twinkle_task is not None:
+            twinkle_task.cancel()
         self.panel.clear()
         logger.info("Shot captured: file=%s", image_path)
         loop = asyncio.get_running_loop()
