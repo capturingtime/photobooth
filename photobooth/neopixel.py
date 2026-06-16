@@ -283,22 +283,48 @@ class Neopixel:
         color: tuple = WHITE,
         offset_x: int = 0,
     ) -> bool:
-        """Scroll text once so the full pass takes ~duration_s seconds.
+        """Scroll text once with absolute-time pacing so the full pass fits ~duration_s.
 
-        Derives per-frame ``speed`` from the rendered text width so the caller
-        specifies the target wall-clock duration rather than tuning ms-per-frame
-        for each label. Pre-renders the image once and passes it to ``scroll``
-        to avoid a second draw_text() pass.
+        The earlier "speed = duration_s / frames" implementation ignored the
+        wall-clock cost of ``np.show()`` (≈10-15ms per frame on the live Pi),
+        which made every label scroll roughly 2.5× the requested duration.
+        This rewrite computes a per-frame *deadline* from the start time and
+        sleeps only until that deadline; when rendering is already behind,
+        the sleep is skipped (yields via ``sleep(0)``) so total wall-clock
+        is bounded above by the hardware render time rather than extended
+        further by stale per-frame sleeps.
         """
         if not isinstance(text, Image.Image):
             text = self.draw_text(text)
+        rows = self.rows
+        cols = self.cols
         # Frame count matches scroll()'s inner loop: text_width + cols where
         # text_width = image.width - (cols * 2). Simplifies to image.width - cols.
-        frames = text.width - self.cols
-        speed = duration_s / frames if frames > 0 else DEFAULT_SPEED
-        return await self.scroll(
-            text=text, speed=speed, count=1, offset_x=offset_x, color=color
-        )
+        frames = text.width - cols
+        if frames <= 0:
+            return True
+        _, color = valid_color_tuple(color, fix=True)
+        loop = asyncio.get_event_loop()
+        start = loop.time()
+        for frame_i in range(frames):
+            for x in range(cols):
+                for y in range(rows):
+                    if text.getpixel((x + offset_x, y)) == 255:
+                        self.np[getIndex(x, y, rows, cols)] = color
+                    else:
+                        self.np[getIndex(x, y, rows, cols)] = (0, 0, 0)
+            offset_x += 1
+            if offset_x + cols > text.size[0]:
+                offset_x = 0
+            self.np.show()
+            target = start + duration_s * (frame_i + 1) / frames
+            remaining = target - loop.time()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            else:
+                await asyncio.sleep(0)
+        self.clear()
+        return True
 
     async def flash(self, **kwargs):
         """Flash text on the panel (placeholder — delegates to scroll)."""
