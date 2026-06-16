@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from escpos.printer import Usb
@@ -51,6 +52,35 @@ PRINTER_MAP = {
         },
     },
 }
+
+
+def _probe_printer_sync(model: str) -> bool:
+    """Synchronous USB device probe — looks up ``model`` in ``PRINTER_MAP``
+    and returns True if a USB device with that vendor/product ID is
+    currently enumerated. Used by ``probe_printer_available``.
+    """
+    spec = PRINTER_MAP.get(model, PRINTER_MAP["default"])
+    cfg = spec["config"]
+    try:
+        import usb.core
+
+        dev = usb.core.find(idVendor=cfg["idVendor"], idProduct=cfg["idProduct"])
+        return dev is not None
+    except Exception as exc:
+        logger.debug("probe_printer_available: USB lookup error %s", exc)
+        return False
+
+
+async def probe_printer_available(model: str = "PBM-8350U") -> bool:
+    """Return True if the receipt printer's USB device is enumerated.
+
+    Used by ``HealthMonitor`` (v0.5.0 Phase 4). The probe only checks
+    that the USB device with the configured vendor/product ID is
+    present — it does not open the device, so it is safe to call while
+    another process (or a prior init attempt) holds the handle.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _probe_printer_sync, model)
 
 
 class Printer:

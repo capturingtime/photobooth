@@ -42,6 +42,39 @@ def run_local_cmd(cmd: str):
         logger.warning("run_local_cmd failed: %s", err)
 
 
+async def probe_internet_available(host: str = "http://google.com") -> bool:
+    """Async wrapper around ``connect`` for ``HealthMonitor`` use (v0.5.0 Phase 4)."""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, connect, host)
+    except Exception as exc:
+        logger.debug("probe_internet_available: %s", exc)
+        return False
+
+
+async def probe_local_network() -> bool:
+    """Return True when ARP discovers any neighbor on the LAN."""
+    loop = asyncio.get_running_loop()
+    try:
+        neighbors = await loop.run_in_executor(None, arp_list)
+    except Exception as exc:
+        logger.debug("probe_local_network: %s", exc)
+        return False
+    return bool(neighbors)
+
+
+async def probe_web_available(
+    url: str = "http://127.0.0.1:8000/main/",
+) -> bool:
+    """Return True when the local Django server responds to ``url``."""
+    loop = asyncio.get_running_loop()
+    try:
+        return await loop.run_in_executor(None, connect, url)
+    except Exception as exc:
+        logger.debug("probe_web_available: %s", exc)
+        return False
+
+
 class Booth:
     """Orchestrates photobooth components and owns the asyncio event queue.
 

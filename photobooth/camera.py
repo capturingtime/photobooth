@@ -83,6 +83,22 @@ def get_cameras() -> list:
     return detected_cameras
 
 
+async def probe_camera_available(model: str) -> bool:
+    """Return True if gphoto2 detects a camera whose name contains ``model``.
+
+    Used by ``HealthMonitor`` (v0.5.0 Phase 4) to decide whether the
+    booth can proceed past startup. Never raises — any error during
+    detection is treated as "not present" and the caller will retry.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        cameras = await loop.run_in_executor(None, get_cameras)
+    except Exception as exc:
+        logger.debug("probe_camera_available: detection error %s", exc)
+        return False
+    return any(model in c.get("model", "") for c in cameras)
+
+
 def capture_and_download(download_dir: str, camera: str, port: str) -> str:
     """Synchronous gphoto2 capture. Kept for non-async callers / testing."""
     filename = _build_filename(download_dir)

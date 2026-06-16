@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 
 from random import randint
@@ -6,6 +7,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 import board
 import neopixel
+
+logger = logging.getLogger(__name__)
 
 ABSPATH = os.path.dirname(__file__)
 RESOURCES = os.path.join(ABSPATH, "resources")
@@ -85,6 +88,27 @@ def valid_color_tuple(rgb_tuple, fix=False) -> tuple:
                 rgb_list[i] = 255 if c > 255 else 0
 
     return valid, tuple(rgb_list)
+
+
+async def probe_neopixel_available(control=None, rows: int = 8, cols: int = 32) -> bool:
+    """Return True if a Neopixel hardware instance can be constructed.
+
+    Used by ``HealthMonitor`` (v0.5.0 Phase 4). Attempts to import
+    ``board`` and instantiate a transient ``Neopixel`` on the given pin;
+    the instance is discarded after a single ``clear()`` so the real
+    ``add_neopixel`` call that follows in ``_startup`` starts from a
+    clean panel. Never raises.
+    """
+    try:
+        import board as _board
+
+        pin = control if control is not None else _board.D18
+        np = Neopixel(control=pin, rows=rows, cols=cols)
+        np.clear()
+        return True
+    except Exception as exc:
+        logger.debug("probe_neopixel_available: instantiation error %s", exc)
+        return False
 
 
 class Neopixel:

@@ -17,9 +17,62 @@ from typing import Optional
 import board
 
 from photobooth import RPi, Uploader
+from photobooth.health import HealthMonitor
 from photobooth.logging_config import setup_logging
 from photobooth.strip import PhotoStrip
 from photobooth.template_loader import LocalTemplateLoader
+
+# Phase 4 health probes are imported lazily inside ``_startup`` so the
+# booth_main module surface stays importable on non-Pi dev machines
+# (where the transitive ``escpos`` / ``neopixel`` / ``board`` deps
+# aren't always installed). Tests patch these names on the
+# ``booth_main`` module after import — keep them as module-level
+# attributes so ``monkeypatch.setattr`` works the same way it does for
+# pre-Phase-4 names.
+probe_camera_available = None
+probe_internet_available = None
+probe_local_network = None
+probe_neopixel_available = None
+probe_printer_available = None
+probe_web_available = None
+
+
+def _load_probes() -> None:
+    """Resolve probe symbols from their home modules.
+
+    Called by ``_startup`` so a fresh process binds the real probes;
+    tests that ``monkeypatch.setattr`` the names on this module override
+    these bindings without going through ``_load_probes``.
+    """
+    global probe_camera_available, probe_internet_available
+    global probe_local_network, probe_neopixel_available
+    global probe_printer_available, probe_web_available
+
+    if probe_camera_available is None:
+        from photobooth.camera import probe_camera_available as _camera
+
+        probe_camera_available = _camera
+    if probe_internet_available is None:
+        from photobooth.booth import probe_internet_available as _www
+
+        probe_internet_available = _www
+    if probe_local_network is None:
+        from photobooth.booth import probe_local_network as _lan
+
+        probe_local_network = _lan
+    if probe_neopixel_available is None:
+        from photobooth.neopixel import probe_neopixel_available as _np
+
+        probe_neopixel_available = _np
+    if probe_printer_available is None:
+        from photobooth.printer import probe_printer_available as _print
+
+        probe_printer_available = _print
+    if probe_web_available is None:
+        from photobooth.booth import probe_web_available as _web
+
+        probe_web_available = _web
+
 
 logger = logging.getLogger(__name__)
 
@@ -31,6 +84,17 @@ CAMERA_STARTUP_CONFIG = {
     "autoexposuremode": 3,  # Manual — prevents built-in flash from auto-firing
 }
 MAX_PRINTS = int(os.environ.get("BOOTH_MAX_PRINTS", "3"))
+
+# --- Startup health-probe timeouts (v0.5.0 Phase 4) ---
+# Required components raise on miss so systemd can restart the service.
+# Optional components log + continue (degraded mode).
+HEALTH_TIMEOUT_WEB = 30.0  # Django subprocess we just spawned — fast.
+HEALTH_TIMEOUT_NEOPIXEL = 300.0  # Required — long retry window.
+HEALTH_TIMEOUT_CAMERA = 300.0  # Required — covers swapping batteries / USB.
+HEALTH_TIMEOUT_PRINTER = 300.0  # Required (receipt) — long retry window.
+HEALTH_TIMEOUT_NET_LOCAL = 5.0  # Optional — quick check, no blocking.
+HEALTH_TIMEOUT_NET_WWW = 5.0  # Optional — quick check, no blocking.
+HEALTH_RECHECK_INTERVAL = 10.0  # Background re-probe cadence for unavailable.
 
 # --- Print compositor templates (folders under TEMPLATE_BASE_DIR) ---
 # BOOTH_ACTIVE_TEMPLATE: unset/empty = plain single-shot
@@ -301,10 +365,26 @@ class PhotoBooth:
     # ------------------------------------------------------------------
 
     async def _startup(self):
+        """Bring the booth online with dependency-aware health probes.
+
+        Phase 4: each component is registered with ``HealthMonitor`` and
+        we ``wait_until_ready`` instead of raising on the first failure.
+        Required components (web, neopixel, camera, receipt printer) use
+        a long timeout; optional components (local LAN, internet) use a
+        short timeout and log+continue if not present.
+
+        After init completes, ``recheck_loop`` runs in the background so
+        a component that fails at runtime and later self-heals flips
+        back to ``ready`` without intervention (consumed in later phases).
+        """
+        self.health = HealthMonitor()
+        _load_probes()
+
         logger.info("Starting Django web server")
         await self.rpi.start_web()
-        while not self.rpi.check_web():
-            await asyncio.sleep(0.1)
+        self.health.register("web", probe_web_available)
+        if not await self.health.wait_until_ready("web", timeout=HEALTH_TIMEOUT_WEB):
+            raise RuntimeError("Django web server did not respond within timeout")
         logger.debug("Django web server responding")
 
         logger.info("Starting kiosk browser")
@@ -312,33 +392,44 @@ class PhotoBooth:
         self.rpi.reset_last_shot()
 
         logger.debug("Initializing components")
-        try:
-            self.panel = self.rpi.add_neopixel(name="main", control=board.D18)
-            logger.info("Component online: neopixel name=main (8x32)")
-        except Exception as exc:
-            logger.error("Component offline: neopixel name=main — %s", exc)
-            raise
-        try:
-            self.camera = self.rpi.add_camera(
-                name="main", model=CAMERA_MODEL, startup_config=CAMERA_STARTUP_CONFIG
-            )
-            logger.info("Component online: camera name=main model=%s", CAMERA_MODEL)
-        except Exception as exc:
-            logger.error(
-                "Component offline: camera name=main model=%s — %s", CAMERA_MODEL, exc
-            )
-            raise
-        try:
-            self.printer = self.rpi.add_printer(name="receipt", model="PBM-8350U")
-            logger.info("Component online: printer name=receipt model=PBM-8350U")
-        except Exception as exc:
-            logger.error("Component offline: printer name=receipt — %s", exc)
-            raise
+
+        self.health.register("neopixel", probe_neopixel_available)
+        if not await self.health.wait_until_ready("neopixel", timeout=HEALTH_TIMEOUT_NEOPIXEL):
+            raise RuntimeError("Neopixel panel did not come online within timeout")
+        self.panel = await self._init_with_retry(
+            "neopixel",
+            lambda: self.rpi.add_neopixel(name="main", control=board.D18),
+        )
+        logger.info("Component online: neopixel name=main (8x32)")
+
+        self.health.register("camera", lambda: probe_camera_available(CAMERA_MODEL))
+        if not await self.health.wait_until_ready("camera", timeout=HEALTH_TIMEOUT_CAMERA):
+            raise RuntimeError("Camera did not come online within timeout")
+        self.camera = await self._init_with_retry(
+            "camera",
+            lambda: self.rpi.add_camera(
+                name="main",
+                model=CAMERA_MODEL,
+                startup_config=CAMERA_STARTUP_CONFIG,
+            ),
+        )
+        logger.info("Component online: camera name=main model=%s", CAMERA_MODEL)
+
+        self.health.register("printer", probe_printer_available)
+        if not await self.health.wait_until_ready("printer", timeout=HEALTH_TIMEOUT_PRINTER):
+            raise RuntimeError("Receipt printer did not come online within timeout")
+        self.printer = await self._init_with_retry(
+            "printer",
+            lambda: self.rpi.add_printer(name="receipt", model="PBM-8350U"),
+        )
+        logger.info("Component online: printer name=receipt model=PBM-8350U")
 
         panel_test = asyncio.create_task(self.panel.panel_test())
 
-        local_ok = bool(self.rpi.net_check_local())
-        www_ok = bool(self.rpi.net_check_www())
+        self.health.register("net_local", probe_local_network)
+        self.health.register("net_www", probe_internet_available)
+        local_ok = await self.health.wait_until_ready("net_local", timeout=HEALTH_TIMEOUT_NET_LOCAL)
+        www_ok = await self.health.wait_until_ready("net_www", timeout=HEALTH_TIMEOUT_NET_WWW)
         logger.info("Network check: local=%s www=%s", local_ok, www_ok)
         if local_ok:
             self.rpi.toggle_led(label="net_local", on=True)
@@ -350,7 +441,34 @@ class PhotoBooth:
 
         await panel_test
         self.rpi.toggle_led(label="shutter_rdy", on=True)
+
+        self._recheck_task = asyncio.create_task(
+            self.health.recheck_loop(interval=HEALTH_RECHECK_INTERVAL)
+        )
         logger.info("Booth is online and ready")
+
+    async def _init_with_retry(self, name: str, factory):
+        """Run a hardware ``factory`` after its probe reports ready.
+
+        If init still raises (rare — a transient state between probe
+        passing and instantiation), re-await ``wait_until_ready(name)``
+        with no timeout and try again. Keeps the booth from crashing on
+        the boundary case where USB enumeration completes between the
+        probe and the open.
+        """
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                return factory()
+            except Exception as exc:
+                logger.warning(
+                    "Component init failed: %s (attempt %d) — %s",
+                    name,
+                    attempts,
+                    exc,
+                )
+                await self.health.wait_until_ready(name, timeout=None)
 
     # ------------------------------------------------------------------
     # Capture flows
