@@ -4,14 +4,27 @@
 <head>
     <style>
         body { background-color: black; margin: 0; padding: 0; }
-        .frame { position: relative; width: 100vw; height: 100vh; visibility: hidden; }
+        .frame {
+            position: relative;
+            width: 1920px;
+            height: 1080px;
+            visibility: hidden;
+        }
         .photo {
-            position: absolute; width: 100%; height: 100%;
-            object-fit: contain;
+            position: absolute;
+            top: 135px;
+            left: 352px;
+            width: 1215px;
+            height: 810px;
+            object-fit: cover;
+            object-position: center;
         }
         .overlay {
-            position: absolute; width: 100%; height: 100%;
-            object-fit: contain;
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 1920px;
+            height: 1080px;
         }
     </style>
 </head>

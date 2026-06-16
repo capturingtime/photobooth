@@ -84,6 +84,14 @@ class ViewTests(TestCase):
     def test_last_capture_url(self):
         self.assertEqual(reverse("last_capture"), "/main/last_capture/")
 
+    def test_last_capture_photo_aperture_geometry(self):
+        response = self.client.get(reverse("last_capture"))
+        self.assertContains(response, "width: 1215px")
+        self.assertContains(response, "height: 810px")
+        self.assertContains(response, "top: 135px")
+        self.assertContains(response, "left: 352px")
+        self.assertContains(response, "object-fit: cover")
+
     # ------------------------------------------------------------------
     # series_final (layered photo + overlay)
     # ------------------------------------------------------------------
@@ -123,3 +131,11 @@ class ViewTests(TestCase):
     def test_single_final_contains_overlay(self):
         response = self.client.get(reverse("single_final"))
         self.assertContains(response, "single_final.png")
+
+    def test_single_final_photo_aperture_geometry(self):
+        response = self.client.get(reverse("single_final"))
+        self.assertContains(response, "width: 1215px")
+        self.assertContains(response, "height: 810px")
+        self.assertContains(response, "top: 135px")
+        self.assertContains(response, "left: 352px")
+        self.assertContains(response, "object-fit: cover")
