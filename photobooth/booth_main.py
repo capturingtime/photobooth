@@ -222,7 +222,7 @@ class PhotoBooth:
         self.rpi.setup_gpio_events(loop)
 
         if not self._pending_resume_shots:
-            await self.rpi.display_url(ATTRACT_URL)
+            await self.display_url_with_context(ATTRACT_URL, **self._series_params())
             attract_text = "Press the big blue button to begin!  "
         else:
             attract_text = "Press the big blue button to continue!  "
@@ -263,7 +263,7 @@ class PhotoBooth:
                     logger.info("Capture cancelled by user")
                     self._clear_resume_state()
                     await self._flush_events()
-                    await self.rpi.display_url(ATTRACT_URL)
+                    await self.display_url_with_context(ATTRACT_URL, **self._series_params())
                     logger.debug("Returning to attract mode")
                     attract = asyncio.create_task(
                         self.panel.scroll(
@@ -288,7 +288,7 @@ class PhotoBooth:
 
                 # Navigate to the final screen after upload resolves so the
                 # user does not see the screen flicker mid-upload.
-                await self.rpi.display_url(final_url)
+                await self.display_url_with_context(final_url, **self._series_params())
 
                 # Hold final screen up to 60 s; green = print receipt, anything else = attract
                 await self._flush_events()
@@ -308,7 +308,7 @@ class PhotoBooth:
                 # returning to attract.
                 self._clear_resume_state()
                 await self._flush_events()
-                await self.rpi.display_url(ATTRACT_URL)
+                await self.display_url_with_context(ATTRACT_URL, **self._series_params())
                 logger.debug("Returning to attract mode")
                 attract = asyncio.create_task(
                     self.panel.scroll(
@@ -348,7 +348,7 @@ class PhotoBooth:
                     await self.panel.scroll(
                         text="Max prints reached, sorry!  ", count=1
                     )
-                    await self.rpi.display_url(ATTRACT_URL)
+                    await self.display_url_with_context(ATTRACT_URL, **self._series_params())
                     attract = asyncio.create_task(
                         self.panel.scroll(
                             text="Press the big blue button to begin!  ",
@@ -380,7 +380,7 @@ class PhotoBooth:
             elif event == REDO_BUTTON:
                 attract.cancel()
                 await self._flush_events()
-                await self.rpi.display_url(ATTRACT_URL)
+                await self.display_url_with_context(ATTRACT_URL, **self._series_params())
                 attract = asyncio.create_task(
                     self.panel.scroll(
                         text="Press the big blue button to begin!  ",
@@ -443,14 +443,35 @@ class PhotoBooth:
     async def display_url_with_context(self, url: str, **params) -> None:
         """Navigate to ``url`` with optional query-string params.
 
-        Phase 5 uses this only for the post-recovery navigation back to
-        the series_capture page. Phase 7 will route every navigation
-        through this helper so the in-frame series banner (``?shot=X&
-        total=N&mode=series``) populates from a single source.
+        Phase 7: every navigation routes through this helper so the
+        in-frame series banner (``?shot=X&total=N&mode=series``)
+        populates from a single source. Empty ``params`` leaves the URL
+        untouched.
         """
         if params:
             url = f"{url}?{urlencode(params)}"
         await self.rpi.display_url(url)
+
+    def _series_params(self, shot: Optional[int] = None) -> dict:
+        """Build the series-banner query params for a screen navigation.
+
+        Returns ``{"mode": "series"|"single", "total": N}`` and, when
+        ``shot`` is given, adds ``"shot": X``. ``mode`` is ``"series"``
+        when the active template has ``shot_count > 1`` (the banner is
+        rendered by attract/last_capture only in that mode);
+        ``"single"`` otherwise. ``total`` falls back to ``1`` when no
+        template is loaded so the URL is always shaped the same way.
+
+        ``getattr`` keeps direct-method tests working — fixtures that
+        don't bring up ``run()`` never set ``self.strip``.
+        """
+        strip = getattr(self, "strip", None)
+        is_series = strip is not None and strip.shot_count > 1
+        total = strip.shot_count if strip is not None else 1
+        params = {"mode": "series" if is_series else "single", "total": total}
+        if shot is not None:
+            params["shot"] = shot
+        return params
 
     async def _enter_unavailable(self, component: str, scroll_text: str) -> None:
         """Switch the booth to unavailable mode and await component recovery.
@@ -466,7 +487,7 @@ class PhotoBooth:
         long press during the dead window doesn't fire on recovery.
         """
         logger.warning("Entering unavailable mode: component=%s", component)
-        await self.rpi.display_url(UNAVAILABLE_URL)
+        await self.display_url_with_context(UNAVAILABLE_URL)
         scroll_task = asyncio.create_task(
             self.panel.scroll(
                 text=scroll_text,
@@ -864,7 +885,12 @@ class PhotoBooth:
                     logger.info("Series cancelled by user (start over)")
                     return None
                 continue
-            decision = await self._review_shot(image_path, series_mode=True)
+            decision = await self._review_shot(
+                image_path,
+                series_mode=True,
+                shot=len(shots) + 1,
+                total=total,
+            )
 
             if decision == "redo":
                 series_decision = await self._series_capture_review(
@@ -970,7 +996,13 @@ class PhotoBooth:
                 img.thumbnail((max_dimension, max_dimension), Image.LANCZOS)
             img.save(image_path, "JPEG", quality=quality, optimize=True)
 
-    async def _review_shot(self, image_path: str, series_mode: bool = False) -> str:
+    async def _review_shot(
+        self,
+        image_path: str,
+        series_mode: bool = False,
+        shot: Optional[int] = None,
+        total: Optional[int] = None,
+    ) -> str:
         """Display shot in the review frame and wait for a decision.
 
         Returns:
@@ -982,9 +1014,27 @@ class PhotoBooth:
         capture reaction phrase. Any phrase task launched by
         ``_take_one_shot`` is cancelled/awaited at the end so the panel
         is idle by the next state transition.
+
+        Phase 7: ``shot`` / ``total`` (when provided by the series flow)
+        populate ``?mode=series&shot=X&total=N`` on the review URL so the
+        ``last_capture.html`` template renders the "Shot X of N" banner.
+        ``series_mode=False`` short-circuits the banner mode regardless of
+        whether ``shot`` / ``total`` are supplied (the re-review path
+        inside ``_series_capture_review`` passes ``series_mode=False`` so
+        the user-driven re-inspection of a single shot stays uncluttered).
         """
         self.rpi.copy_to_last_shot(image_path)
-        await self.rpi.display_url(REVIEW_URL)
+        if series_mode and shot is not None and total is not None:
+            params = {"mode": "series", "shot": shot, "total": total}
+        else:
+            # In ``series_mode=False`` (single review or the in-series
+            # re-review path) we never want the banner; force
+            # ``mode=single`` so the template's ``{% if mode == "series" %}``
+            # block stays hidden even when the active template is a
+            # multi-shot strip.
+            params = self._series_params()
+            params["mode"] = "single"
+        await self.display_url_with_context(REVIEW_URL, **params)
         await self._flush_events()
 
         decision = await self.rpi.next_event()
@@ -1033,7 +1083,15 @@ class PhotoBooth:
         change and the countdown for the next shot.
         """
         while True:
-            await self.rpi.display_url(SERIES_CAPTURE_URL)
+            # Phase 7: the banner reads "Next shot: X of N" where X is the
+            # number of shots NOT yet captured at this point in the loop.
+            # ``shots`` may have mutated in the inner re-review block, so
+            # recompute every iteration.
+            next_shot = len(shots) + 1
+            await self.display_url_with_context(
+                SERIES_CAPTURE_URL,
+                **self._series_params(shot=next_shot),
+            )
             await self._flush_events()
             scroll = asyncio.create_task(
                 self.panel.scroll(

@@ -108,8 +108,11 @@ async def test_display_url_invoked_before_phrase_first_sleep(booth):
     assert display_idx is not None, f"display_url never invoked; timeline={timeline}"
     assert phrase_idx is not None, f"phrase scroll never ran; timeline={timeline}"
 
-    # The display_url URL must be REVIEW_URL.
-    assert timeline[display_idx][1] == REVIEW_URL
+    # The display_url URL must target REVIEW_URL. Phase 7 routes the
+    # call through ``display_url_with_context``, which appends
+    # ``?mode=single&total=1`` for a no-template booth, so only the
+    # base URL is pinned here.
+    assert timeline[display_idx][1].startswith(REVIEW_URL)
 
     # The core Phase 2 invariant: display_url runs before the phrase
     # task's first sleep yields back to the loop.
