@@ -77,6 +77,18 @@ async def test_take_one_shot_countdown_timing(booth):
 
     await booth._take_one_shot()
 
+    # Phase 2: the reaction phrase is now launched as a background task
+    # on ``booth._phrase_task``. Drain it so the event loop closes cleanly
+    # without a "Task was destroyed but it is pending" warning.
+    phrase_task = getattr(booth, "_phrase_task", None)
+    if phrase_task is not None:
+        if not phrase_task.done():
+            phrase_task.cancel()
+        try:
+            await phrase_task
+        except asyncio.CancelledError:
+            pass
+
     capture_events = [e for e in timeline if e[0] == "capture_called"]
     smile_events = [e for e in timeline if e[0] == "scroll" and "Smile" in e[1]]
 

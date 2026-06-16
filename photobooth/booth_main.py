@@ -434,6 +434,12 @@ class PhotoBooth:
         and ``Smile! :D`` scrolls in parallel for 0.8s. If the camera's real
         gphoto2 latency extends past the Smile! scroll, twinkle runs as a
         visual fallback until the capture task resolves.
+
+        Phase 2: the post-capture reaction phrase is launched as a
+        background task on ``self._phrase_task`` so the caller can navigate
+        to the review screen in parallel. ``_review_shot`` cancels/awaits
+        the task before returning, guaranteeing the panel is idle by the
+        next state transition.
         """
         await self.panel.scroll_for_duration(text="3...", duration_s=0.4)
         await self.panel.scroll_for_duration(text="2...", duration_s=0.4)
@@ -455,8 +461,10 @@ class PhotoBooth:
             logger.debug("Compressed shot: file=%s size=%d bytes", image_path, size)
         except OSError:
             pass
-        await self.panel.scroll(
-            text=random.choice(CAPTURE_PHRASES), speed=0.001, count=1
+        self._phrase_task = asyncio.create_task(
+            self.panel.scroll(
+                text=random.choice(CAPTURE_PHRASES), speed=0.001, count=1
+            )
         )
         return image_path
 
@@ -479,6 +487,11 @@ class PhotoBooth:
             "keep"     — accept this shot
             "redo"     — cancel (single: → attract; series: → attract/cancel)
             "continue" — accept and skip series_capture (series_mode only)
+
+        Phase 2: navigates to the review URL without awaiting the post-
+        capture reaction phrase. Any phrase task launched by
+        ``_take_one_shot`` is cancelled/awaited at the end so the panel
+        is idle by the next state transition.
         """
         self.rpi.copy_to_last_shot(image_path)
         await self.rpi.display_url(REVIEW_URL)
@@ -487,6 +500,20 @@ class PhotoBooth:
         decision = await self.rpi.next_event()
         while decision not in (KEEP_BUTTON, REDO_BUTTON, "capture"):
             decision = await self.rpi.next_event()
+
+        # Phase 2: clean up the background reaction phrase before yielding
+        # control back to the caller. Use getattr so tests that drive
+        # _review_shot directly (without going through _take_one_shot)
+        # keep working.
+        phrase_task = getattr(self, "_phrase_task", None)
+        if phrase_task is not None:
+            if not phrase_task.done():
+                phrase_task.cancel()
+            try:
+                await phrase_task
+            except asyncio.CancelledError:
+                pass
+            self._phrase_task = None
 
         result = "redo" if decision == REDO_BUTTON else "keep"
         logger.debug("Shot review decision: %s (button=%s)", result, decision)
