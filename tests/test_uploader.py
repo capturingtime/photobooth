@@ -113,6 +113,64 @@ class TestPublicUrl:
             assert needle not in url, f"{needle!r} unexpectedly present in {url!r}"
 
 
+class TestPredictableUrlContract:
+    """v0.5.0 Phase 6 documents the deterministic-by-key contract.
+
+    The offline-upload flow leans on ``public_url(key)`` returning the
+    same string for the same ``key`` every time — that's the property
+    that lets the printed QR keep working after the upload eventually
+    drains from the queue.
+    """
+
+    def test_public_url_is_deterministic_for_a_given_key(self, uploader):
+        key = "booth/2026/05/20/abc12345_shot.jpg"
+        # Same key -> same URL across calls (no signature, no expiry).
+        urls = {uploader.public_url(key) for _ in range(20)}
+        assert len(urls) == 1
+
+    def test_public_url_matches_make_key_output_shape(self, uploader):
+        """The QR printed on the receipt is built from ``public_url(key)``;
+        verify ``make_key`` output flows through ``public_url`` without
+        any mangling that would break the round-trip.
+        """
+        from photobooth.uploader import Uploader
+
+        key = Uploader.make_key("/tmp/shot.jpg")
+        url = uploader.public_url(key)
+        assert url == f"http://test.bucket.example.com/{key}"
+
+
+class TestUploadWithTimeout:
+    """``upload_with_timeout`` wraps ``upload`` in ``asyncio.wait_for``
+    so the capture flow can move on if the link is dead. The wrapper
+    must surface ``TimeoutError`` cleanly and propagate non-timeout
+    errors unchanged so the caller can distinguish offline from
+    misconfiguration.
+    """
+
+    async def test_timeout_raises_asyncio_timeout_error(self, uploader, tmp_path):
+        import asyncio
+
+        async def slow_upload(*a, **k):
+            await asyncio.sleep(5)
+            return "url"
+
+        uploader.upload = slow_upload  # type: ignore[method-assign]
+        with pytest.raises(asyncio.TimeoutError):
+            await uploader.upload_with_timeout(str(tmp_path / "shot.jpg"), key="k", timeout_s=0.05)
+
+    async def test_success_returns_public_url(self, uploader, tmp_path):
+        from unittest.mock import patch
+
+        with patch("utilities.classes.path.file.File"):
+            url = await uploader.upload_with_timeout(
+                str(tmp_path / "shot.jpg"),
+                key="booth/2026/05/20/abc12345_shot.jpg",
+                timeout_s=5.0,
+            )
+        assert url == "http://test.bucket.example.com/booth/2026/05/20/abc12345_shot.jpg"
+
+
 class TestUpload:
     async def test_returns_public_url_not_presigned(self, uploader, tmp_path):
         with patch("utilities.classes.path.file.File"):
