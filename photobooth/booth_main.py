@@ -13,10 +13,11 @@ import os
 import random
 from datetime import datetime
 from typing import Optional
+from urllib.parse import urlencode
 
 import board
 
-from photobooth import RPi, Uploader
+from photobooth import RPi, Uploader, state_store
 from photobooth.health import HealthMonitor
 from photobooth.logging_config import setup_logging
 from photobooth.strip import PhotoStrip
@@ -130,6 +131,13 @@ REVIEW_URL = "http://127.0.0.1:8000/main/last_capture/"
 SINGLE_FINAL_URL = "http://127.0.0.1:8000/main/single_final/"
 SERIES_FINAL_URL = "http://127.0.0.1:8000/main/series_final/"
 SERIES_CAPTURE_URL = "http://127.0.0.1:8000/main/series_capture/"
+UNAVAILABLE_URL = "http://127.0.0.1:8000/main/unavailable/"
+
+# --- Phase 5: unavailable-mode + resume ---
+RESUME_STATE_PATH = os.environ.get("BOOTH_RESUME_STATE_PATH", "/var/lib/photobooth/resume.json")
+CAMERA_UNAVAILABLE_TEXT = "Camera not detected. Check power and USB.  "
+PRINTER_UNAVAILABLE_TEXT = "Printer not responding  "
+UNAVAILABLE_SCROLL_COLOR = (255, 0, 0)  # RED — inlined to avoid importing neopixel.RED
 
 
 class PhotoBooth:
@@ -157,6 +165,11 @@ class PhotoBooth:
 
         await self._startup()
 
+        # Phase 5: list of paths from a resume record on disk. When non-empty
+        # on the next ``capture`` event, the booth re-enters ``_run_series``
+        # with these shots already captured rather than starting fresh.
+        self._pending_resume_shots: list = []
+
         self.strip = None
         if ACTIVE_TEMPLATE:
             try:
@@ -177,13 +190,23 @@ class PhotoBooth:
         else:
             logger.info("No active template — plain single-shot mode")
 
+        # Phase 5: if a previous session left a resume record on disk,
+        # navigate to the appropriate screen before opening the event loop.
+        # ``_resume_from`` sets ``_pending_resume_shots`` for series mode;
+        # the next blue-button event picks it up.
+        resume_state = state_store.load_json(RESUME_STATE_PATH)
+        if resume_state:
+            await self._resume_from(resume_state)
+
         self.rpi.setup_gpio_events(loop)
 
-        await self.rpi.display_url(ATTRACT_URL)
+        if not self._pending_resume_shots:
+            await self.rpi.display_url(ATTRACT_URL)
+            attract_text = "Press the big blue button to begin!  "
+        else:
+            attract_text = "Press the big blue button to continue!  "
         attract = asyncio.create_task(
-            self.panel.scroll(
-                text="Press the big blue button to begin!  ", speed=0.005, count=999
-            )
+            self.panel.scroll(text=attract_text, speed=0.005, count=999)
         )
         last_print_time: float = 0.0
 
@@ -202,12 +225,22 @@ class PhotoBooth:
                 logger.info("Capture started: mode=%s", mode)
                 attract.cancel()
 
-                image_path = (
-                    await self._run_series() if is_series else await self._run_single()
-                )
+                # Phase 5: a cross-process resume staged ``_pending_resume_shots``
+                # in ``run()``. Consume it here so the series re-enters at the
+                # right shot; clear before the call so a second capture starts
+                # fresh even if this one fails.
+                resume_shots = self._pending_resume_shots
+                self._pending_resume_shots = []
+                if is_series:
+                    image_path = await self._run_series(
+                        starting_shots=resume_shots if resume_shots else None
+                    )
+                else:
+                    image_path = await self._run_single()
 
                 if image_path is None:
                     logger.info("Capture cancelled by user")
+                    self._clear_resume_state()
                     await self._flush_events()
                     await self.rpi.display_url(ATTRACT_URL)
                     logger.debug("Returning to attract mode")
@@ -255,7 +288,7 @@ class PhotoBooth:
                         self._last_uploaded_key = ""  # nothing on S3 to reprint
                     if upload_url is not None:
                         logger.info("Printing receipt for %s", image_path)
-                        await loop.run_in_executor(None, self._do_print, upload_url)
+                        await self._print_with_recovery(upload_url)
                         self._print_counts[image_path] = 1
                         last_print_time = loop.time()
                 elif upload_task is not None:
@@ -265,6 +298,9 @@ class PhotoBooth:
                         logger.error("Upload failed: %s", exc)
                         self._last_uploaded_key = ""
 
+                # Clean session completion — drop any resume record before
+                # returning to attract.
+                self._clear_resume_state()
                 await self._flush_events()
                 await self.rpi.display_url(ATTRACT_URL)
                 logger.debug("Returning to attract mode")
@@ -320,7 +356,7 @@ class PhotoBooth:
                 attract.cancel()
                 url = self.uploader.public_url(last_key)
                 await self.panel.scroll(text="Printing...  ", speed=0.005, count=1)
-                await loop.run_in_executor(None, self._do_print, url)
+                await self._print_with_recovery(url)
                 self._print_counts[last_shot] = count + 1
                 # Set the rate-limit anchor AFTER the print finishes; otherwise
                 # presses queued during the (5+ second) print pop afterwards and
@@ -359,6 +395,126 @@ class PhotoBooth:
                 self.rpi.event_queue.get_nowait()
             except Exception:
                 break
+
+    # ------------------------------------------------------------------
+    # Phase 5: unavailable-mode + resume
+    # ------------------------------------------------------------------
+
+    def _save_resume_state(self, state: dict) -> None:
+        """Persist a resume record to RESUME_STATE_PATH (atomic JSON write).
+
+        Called immediately before any hardware op that can fail at runtime
+        so a crash mid-failure (or a recovery from a cold restart) finds
+        the most recent step on disk. Errors writing state are logged but
+        do not abort the capture flow — the booth keeps running on stale
+        resume info rather than losing the current shot.
+        """
+        try:
+            state_store.save_json_atomic(RESUME_STATE_PATH, state)
+        except Exception as exc:
+            logger.warning("Resume state write failed: %s", exc)
+
+    def _clear_resume_state(self) -> None:
+        """Remove the resume file. Called on clean session completion."""
+        try:
+            state_store.delete_if_exists(RESUME_STATE_PATH)
+        except Exception as exc:
+            logger.warning("Resume state delete failed: %s", exc)
+
+    def _classify_error(self, exc: BaseException, hint: Optional[str] = None) -> tuple:
+        """Map an exception to (component_name, neopixel scroll text).
+
+        ``hint`` lets the caller pin the component (camera vs printer) when
+        the exception type alone is ambiguous (e.g. ``RuntimeError`` is
+        raised by both ``gphoto2`` and ``escpos`` paths).
+        """
+        if hint == "printer":
+            return ("printer", PRINTER_UNAVAILABLE_TEXT)
+        # Default: camera. Phase 5 only wires camera + printer; internet
+        # failures are Phase 6's responsibility (offline queue).
+        return ("camera", CAMERA_UNAVAILABLE_TEXT)
+
+    async def display_url_with_context(self, url: str, **params) -> None:
+        """Navigate to ``url`` with optional query-string params.
+
+        Phase 5 uses this only for the post-recovery navigation back to
+        the series_capture page. Phase 7 will route every navigation
+        through this helper so the in-frame series banner (``?shot=X&
+        total=N&mode=series``) populates from a single source.
+        """
+        if params:
+            url = f"{url}?{urlencode(params)}"
+        await self.rpi.display_url(url)
+
+    async def _enter_unavailable(self, component: str, scroll_text: str) -> None:
+        """Switch the booth to unavailable mode and await component recovery.
+
+        Caller has already saved any resume state it cares about (via
+        ``_save_resume_state``) before invoking the failing operation.
+        This method handles the display + scroll + wait + cleanup, then
+        returns once ``HealthMonitor`` reports ``component`` is ready.
+
+        The kiosk is parked on UNAVAILABLE_URL and the neopixel scrolls
+        ``scroll_text`` in red continuously (``count=999``). Button events
+        accumulated during the outage are drained before returning so a
+        long press during the dead window doesn't fire on recovery.
+        """
+        logger.warning("Entering unavailable mode: component=%s", component)
+        await self.rpi.display_url(UNAVAILABLE_URL)
+        scroll_task = asyncio.create_task(
+            self.panel.scroll(
+                text=scroll_text,
+                speed=0.005,
+                count=999,
+                color=UNAVAILABLE_SCROLL_COLOR,
+            )
+        )
+        try:
+            await self.health.wait_until_ready(component, timeout=None)
+        finally:
+            scroll_task.cancel()
+            try:
+                await scroll_task
+            except asyncio.CancelledError:
+                pass
+            except Exception as exc:
+                logger.debug("Unavailable scroll exit error: %s", exc)
+            self.panel.clear()
+        await self._flush_events()
+        logger.info("Exiting unavailable mode: component=%s ready", component)
+
+    async def _resume_from(self, state: dict) -> None:
+        """Re-enter the booth at the saved step after a cold restart.
+
+        Phase 5 supports cross-process resume for series mode only —
+        single-shot has no partial state worth preserving. For a series
+        with captured shots in flight, this navigates to the between-
+        shots page with the right ``?shot=X&total=N&mode=series`` query
+        params so the user sees where they left off; the next blue-button
+        event re-enters ``_run_series`` with the restored shots list.
+
+        ``self._pending_resume_shots`` is read by the main loop's
+        ``capture`` handler to bypass starting a fresh series.
+        """
+        mode = state.get("mode")
+        shots = state.get("series_shots") or []
+        total = state.get("total") or 0
+        if mode != "series" or not shots:
+            logger.info("Resume state present but not actionable; clearing")
+            self._clear_resume_state()
+            return
+        logger.info(
+            "Resuming series: shots_captured=%d total=%d",
+            len(shots),
+            total,
+        )
+        self._pending_resume_shots = list(shots)
+        await self.display_url_with_context(
+            SERIES_CAPTURE_URL,
+            mode="series",
+            shot=len(shots) + 1,
+            total=total,
+        )
 
     # ------------------------------------------------------------------
     # Startup
@@ -475,9 +631,18 @@ class PhotoBooth:
     # ------------------------------------------------------------------
 
     async def _run_single(self) -> Optional[str]:
-        """Single-shot flow. Returns final image path, or None on redo."""
+        """Single-shot flow. Returns final image path, or None on redo / failure."""
         logger.debug("Starting single flow")
-        image_path = await self._take_one_shot()
+        image_path = await self._take_one_shot(
+            resume_context={
+                "mode": "single",
+                "pending_step": "capture",
+                "template_name": ACTIVE_TEMPLATE,
+            }
+        )
+        if image_path is None:
+            # Camera failed; user is back from unavailable mode.
+            return None
         decision = await self._review_shot(image_path, series_mode=False)
         if decision == "redo":
             logger.info("Single capture redo by user")
@@ -494,12 +659,20 @@ class PhotoBooth:
             logger.info("Strip composed: file=%s shots=1", final_path)
         return image_path
 
-    async def _run_series(self) -> Optional[str]:
-        """Series flow. Returns composited strip path, or None if cancelled."""
+    async def _run_series(self, starting_shots: Optional[list] = None) -> Optional[str]:
+        """Series flow. Returns composited strip path, or None if cancelled.
+
+        Phase 5: ``starting_shots`` allows a cross-process or in-process
+        resume to re-enter the loop with already-captured paths preserved.
+        On a camera failure mid-series, ``_take_one_shot`` returns ``None``
+        after the user recovers; we navigate to the between-shots page so
+        they can press blue to continue with the same shot, or red to
+        cancel the series.
+        """
         logger.debug("Starting series flow")
         loop = asyncio.get_running_loop()
         total = self.strip.shot_count
-        shots = []
+        shots = list(starting_shots) if starting_shots else []
 
         while len(shots) < total:
             if shots:
@@ -508,7 +681,28 @@ class PhotoBooth:
                     speed=0.005,
                     count=1,
                 )
-            image_path = await self._take_one_shot()
+            image_path = await self._take_one_shot(
+                resume_context={
+                    "mode": "series",
+                    "pending_step": "capture",
+                    "series_shots": list(shots),
+                    "shot_index": len(shots) + 1,
+                    "total": total,
+                    "template_name": ACTIVE_TEMPLATE,
+                }
+            )
+            if image_path is None:
+                # Camera failed; user has just come back from unavailable.
+                # Hand control to the between-shots page so they can press
+                # blue to retry the failed shot, or red to cancel.
+                if not shots:
+                    logger.info("Series cancelled: camera failure before shot 1")
+                    return None
+                series_decision = await self._series_capture_review(shots, last_decided=None)
+                if series_decision == "start_over":
+                    logger.info("Series cancelled by user (start over)")
+                    return None
+                continue
             decision = await self._review_shot(image_path, series_mode=True)
 
             if decision == "redo":
@@ -544,7 +738,7 @@ class PhotoBooth:
     # Review helpers
     # ------------------------------------------------------------------
 
-    async def _take_one_shot(self) -> str:
+    async def _take_one_shot(self, resume_context: Optional[dict] = None) -> Optional[str]:
         """Run the countdown and capture one image.
 
         Timing target (v0.5.0 Phase 1): button-press → shutter ≈ 2.0s.
@@ -558,7 +752,15 @@ class PhotoBooth:
         to the review screen in parallel. ``_review_shot`` cancels/awaits
         the task before returning, guaranteeing the panel is idle by the
         next state transition.
+
+        Phase 5: ``resume_context`` (a dict describing the current capture
+        position) is persisted to ``RESUME_STATE_PATH`` before the camera
+        is invoked. On a runtime camera failure, the booth enters
+        unavailable mode and waits for recovery, then returns ``None`` so
+        the caller can route the user back to the appropriate screen.
         """
+        if resume_context is not None:
+            self._save_resume_state(resume_context)
         await self.panel.scroll_for_duration(text="3...", duration_s=0.4)
         await self.panel.scroll_for_duration(text="2...", duration_s=0.4)
         await self.panel.scroll_for_duration(text="1...", duration_s=0.4)
@@ -567,7 +769,16 @@ class PhotoBooth:
         twinkle_task = None
         if not capture_task.done():
             twinkle_task = asyncio.create_task(self.panel.twinkle(count=30))
-        image_path = await capture_task
+        try:
+            image_path = await capture_task
+        except Exception as exc:
+            if twinkle_task is not None:
+                twinkle_task.cancel()
+            self.panel.clear()
+            logger.error("Camera capture failed: %s", exc)
+            component, scroll_text = self._classify_error(exc, hint="camera")
+            await self._enter_unavailable(component, scroll_text)
+            return None
         if twinkle_task is not None:
             twinkle_task.cancel()
         self.panel.clear()
@@ -702,6 +913,27 @@ class PhotoBooth:
     # ------------------------------------------------------------------
     # Receipt printer
     # ------------------------------------------------------------------
+
+    async def _print_with_recovery(self, url: str) -> None:
+        """Run ``_do_print`` in the thread executor; on failure, enter
+        unavailable mode and retry once after the printer recovers.
+
+        ``url`` is a presigned S3 URL (or public URL on reprint) — kept in
+        memory only and never persisted to ``resume.json``, since presigned
+        URLs are sensitive credential material.
+        """
+        loop = asyncio.get_running_loop()
+        try:
+            await loop.run_in_executor(None, self._do_print, url)
+            return
+        except Exception as exc:
+            logger.error("Receipt print failed: %s", exc)
+            component, scroll_text = self._classify_error(exc, hint="printer")
+            await self._enter_unavailable(component, scroll_text)
+        try:
+            await loop.run_in_executor(None, self._do_print, url)
+        except Exception as exc:
+            logger.error("Receipt print retry failed: %s", exc)
 
     def _do_print(self, url: str) -> None:
         """Synchronous receipt printer — runs in thread executor from async caller.

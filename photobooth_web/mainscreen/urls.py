@@ -12,6 +12,7 @@ urlpatterns = [
     path("series_capture/", views.series_capture, name="series_capture"),
     path("series_final/", views.series_final, name="series_final"),
     path("single_final/", views.single_final, name="single_final"),
+    path("unavailable/", views.unavailable, name="unavailable"),
 ]
 
 if settings.DEBUG:

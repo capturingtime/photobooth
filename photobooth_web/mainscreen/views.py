@@ -27,3 +27,7 @@ def series_final(request):
 
 def single_final(request):
     return render(request, "single_final.html")
+
+
+def unavailable(request):
+    return render(request, "unavailable.html")
