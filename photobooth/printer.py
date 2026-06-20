@@ -1,3 +1,4 @@
+import asyncio
 import logging
 
 from escpos.printer import Usb
@@ -53,6 +54,35 @@ PRINTER_MAP = {
 }
 
 
+def _probe_printer_sync(model: str) -> bool:
+    """Synchronous USB device probe — looks up ``model`` in ``PRINTER_MAP``
+    and returns True if a USB device with that vendor/product ID is
+    currently enumerated. Used by ``probe_printer_available``.
+    """
+    spec = PRINTER_MAP.get(model, PRINTER_MAP["default"])
+    cfg = spec["config"]
+    try:
+        import usb.core
+
+        dev = usb.core.find(idVendor=cfg["idVendor"], idProduct=cfg["idProduct"])
+        return dev is not None
+    except Exception as exc:
+        logger.debug("probe_printer_available: USB lookup error %s", exc)
+        return False
+
+
+async def probe_printer_available(model: str = "PBM-8350U") -> bool:
+    """Return True if the receipt printer's USB device is enumerated.
+
+    Used by ``HealthMonitor`` (v0.5.0 Phase 4). The probe only checks
+    that the USB device with the configured vendor/product ID is
+    present — it does not open the device, so it is safe to call while
+    another process (or a prior init attempt) holds the handle.
+    """
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, _probe_printer_sync, model)
+
+
 class Printer:
     """Loads a printer according to the model supplied (explicit list of support)
     and provides common functions
@@ -82,10 +112,32 @@ class Printer:
 
         self.inputs = locals()
 
-        config = self.printer_spec["config"]
-        self.printer = Usb(**config)
+        self._config = self.printer_spec["config"]
+        self.printer = Usb(**self._config)
 
         # TODO: Add logic that verifies the printer is working
+
+    def reconnect(self) -> bool:
+        """Drop the cached escpos ``Usb`` instance and rebuild it.
+
+        Power-cycling a USB receipt printer re-enumerates the device and
+        invalidates the libusb handle stored inside the escpos ``Usb``
+        wrapper. Subsequent ``self.printer.text(...)`` calls then fail
+        with ``[Errno 19] No such device (it may have been disconnected)``
+        even though ``probe_printer_available`` (which does a fresh
+        ``usb.core.find``) reports the printer as ready. This mirrors the
+        camera-side ``Camera.refresh_address`` fix from earlier in Phase 9.
+
+        Returns True on success; False (and logs a warning) if the
+        rebuild raises so the caller can decide whether to surface the
+        failure or continue with the dead handle.
+        """
+        try:
+            self.printer = Usb(**self._config)
+        except Exception as exc:
+            logger.warning("Printer.reconnect: rebuild failed: %s", exc)
+            return False
+        return True
 
     def ln(self, count=1):
         """feeds n lines to print buffer

@@ -1,4 +1,5 @@
 import asyncio
+import logging
 import os
 
 from random import randint
@@ -6,6 +7,8 @@ from PIL import Image, ImageDraw, ImageFont
 
 import board
 import neopixel
+
+logger = logging.getLogger(__name__)
 
 ABSPATH = os.path.dirname(__file__)
 RESOURCES = os.path.join(ABSPATH, "resources")
@@ -85,6 +88,27 @@ def valid_color_tuple(rgb_tuple, fix=False) -> tuple:
                 rgb_list[i] = 255 if c > 255 else 0
 
     return valid, tuple(rgb_list)
+
+
+async def probe_neopixel_available(control=None, rows: int = 8, cols: int = 32) -> bool:
+    """Return True if a Neopixel hardware instance can be constructed.
+
+    Used by ``HealthMonitor`` (v0.5.0 Phase 4). Attempts to import
+    ``board`` and instantiate a transient ``Neopixel`` on the given pin;
+    the instance is discarded after a single ``clear()`` so the real
+    ``add_neopixel`` call that follows in ``_startup`` starts from a
+    clean panel. Never raises.
+    """
+    try:
+        import board as _board
+
+        pin = control if control is not None else _board.D18
+        np = Neopixel(control=pin, rows=rows, cols=cols)
+        np.clear()
+        return True
+    except Exception as exc:
+        logger.debug("probe_neopixel_available: instantiation error %s", exc)
+        return False
 
 
 class Neopixel:
@@ -249,6 +273,56 @@ class Neopixel:
                 self.np.show()
                 await asyncio.sleep(speed)
                 i -= 1
+        self.clear()
+        return True
+
+    async def scroll_for_duration(
+        self,
+        text,
+        duration_s: float,
+        color: tuple = WHITE,
+        offset_x: int = 0,
+    ) -> bool:
+        """Scroll text once with absolute-time pacing so the full pass fits ~duration_s.
+
+        The earlier "speed = duration_s / frames" implementation ignored the
+        wall-clock cost of ``np.show()`` (≈10-15ms per frame on the live Pi),
+        which made every label scroll roughly 2.5× the requested duration.
+        This rewrite computes a per-frame *deadline* from the start time and
+        sleeps only until that deadline; when rendering is already behind,
+        the sleep is skipped (yields via ``sleep(0)``) so total wall-clock
+        is bounded above by the hardware render time rather than extended
+        further by stale per-frame sleeps.
+        """
+        if not isinstance(text, Image.Image):
+            text = self.draw_text(text)
+        rows = self.rows
+        cols = self.cols
+        # Frame count matches scroll()'s inner loop: text_width + cols where
+        # text_width = image.width - (cols * 2). Simplifies to image.width - cols.
+        frames = text.width - cols
+        if frames <= 0:
+            return True
+        _, color = valid_color_tuple(color, fix=True)
+        loop = asyncio.get_event_loop()
+        start = loop.time()
+        for frame_i in range(frames):
+            for x in range(cols):
+                for y in range(rows):
+                    if text.getpixel((x + offset_x, y)) == 255:
+                        self.np[getIndex(x, y, rows, cols)] = color
+                    else:
+                        self.np[getIndex(x, y, rows, cols)] = (0, 0, 0)
+            offset_x += 1
+            if offset_x + cols > text.size[0]:
+                offset_x = 0
+            self.np.show()
+            target = start + duration_s * (frame_i + 1) / frames
+            remaining = target - loop.time()
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+            else:
+                await asyncio.sleep(0)
         self.clear()
         return True
 

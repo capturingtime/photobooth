@@ -5,6 +5,60 @@ entry to a workstream when it's time to build; remove when shipped.
 
 ---
 
+## Proactive component health watchdog (v0.5.1 candidate)
+
+Phase 5's `_enter_unavailable` is purely reactive: the booth only notices
+a hardware failure when the next operation against that hardware is
+attempted. On the live booth this is most visible with the camera —
+power it off mid-series, between shots, and nothing happens until the
+user presses blue, at which point the countdown plays, the capture
+fails, and only then does the unavailable screen appear.
+
+### Why pick it up
+
+The current behavior is technically safe (no data loss) and the design
+intent ("wrap each hardware op in try/except") is sound, but the user
+expectation is "if the camera vanishes, tell me right away." The gap is
+most painful at events where the operator isn't standing at the booth
+to notice a tripped USB cable until a guest is mid-press.
+
+### Sketch
+
+Two related changes:
+
+1. **`HealthMonitor.recheck_loop` probes ready components too**, not
+   just ones already in `unavailable`. The probe is cheap (camera is
+   ~0.5 s of `gphoto2 --summary`, printer is a USB enumerate, net is
+   the existing 1 s connection check). A `ready → unavailable`
+   transition publishes a `StateChange` to `state_changes` exactly the
+   way the existing path does.
+2. **`booth_main` subscribes to `state_changes`** in a background task
+   and, when a required component transitions to `unavailable`,
+   interrupts the current main-loop state and routes through
+   `_enter_unavailable`. The interrupt mechanism is the hard part —
+   `asyncio.CancelledError` against whatever the main loop is awaiting
+   (a button event, a screen-hold timeout, an in-flight upload task)
+   plus a state-restoration path on recovery so the booth returns to
+   the right screen.
+
+### Open design questions
+
+- **Probe cadence** for the camera. `--summary` against an idle camera
+  is fine at 10 s intervals; cranking it lower might interfere with
+  actual captures (gphoto2 holds an exclusive USB lock).
+- **Which states are interruptable.** Attract, review, and series-
+  capture are clearly safe. Mid-print is not — interrupting an ESC/POS
+  receipt mid-flight would leave torn paper. Probably gate the
+  interrupt on `_print_with_recovery` not being on the stack.
+- **Test surface.** The reactive path is well-covered by
+  `test_unavailable_mode.py` / `test_resume_mid_series.py`; the
+  proactive path needs at least: probe-flip-during-attract, probe-flip-
+  during-final-screen, probe-flip-during-active-capture (should be
+  swallowed because capture itself will surface it), probe-flip-during-
+  print (should be blocked / queued until print completes).
+
+---
+
 ## Smoke test for booth auto-QA
 
 After every code change to the photobooth runtime, a smoke test should be
@@ -285,3 +339,89 @@ CAMERA_STARTUP_CONFIG = {
 Trade-off: sensor stays warm during long idle days; potentially
 shortens shutter life on a multi-day event. Worth measuring before
 committing.
+
+---
+
+## Canon Selphy CP1500 photo printer integration + `Printer` → `ThermalPrinter` rename
+
+### Why
+
+The booth's only "printer" today is a PBM-8350U thermal device that
+prints a marketing receipt with a QR code linking to the S3-hosted
+photo — the customer never walks away with a paper print of the actual
+shot. Adding a Canon Selphy CP1500 (USB dye-sub, 4×6) makes the booth a
+real "leave with a print in your hand" experience without removing the
+receipt's marketing role.
+
+`PhotoStrip.expand_for_print()` already exists for exactly this — it
+duplicates a 2×6 strip into a 4×6 sheet — but nothing in `booth_main.py`
+calls it today.
+
+### Behavior
+
+- **Add `PhotoPrinter` alongside `ThermalPrinter`.** Both run per
+  capture. Receipt + photo are independent `run_in_executor` calls; a
+  failure on one printer never blocks the other or the return to
+  attract.
+- **Rename `Printer` → `ThermalPrinter`** at the same time. The
+  existing class is opinionated to ESC/POS / thermal hardware
+  (`escpos.printer.Usb`, `text` / `cut` / `qr` / `barcode`); the bare
+  name became misleading once a second printer joined the design. Rename
+  scope: class, module file (`printer.py` → `thermal_printer.py`),
+  `PRINTER_MAP` → `THERMAL_PRINTER_MAP`, `Booth.add_printer` →
+  `Booth.add_thermal_printer`, `tests/test_printer.py` →
+  `tests/test_thermal_printer.py`, and all call sites in
+  `booth_main.py`. No behavioral change.
+- **CUPS via `lp`, not `pycups`.** `PhotoPrinter` shells out to the
+  system `lp` binary via `subprocess.run`. No C-extension build on
+  Buster/Py3.7 (where `rawpy` already broke), and CUPS is already the
+  integration surface either way.
+- **Wire `expand_for_print` into the flow.** Currently unused; called
+  immediately after `compose()` when a `PhotoPrinter` is online. The
+  single-strip output stays the source of truth for the S3 upload and
+  the kiosk review screen.
+
+### Risks
+
+1. **Buster Gutenprint is too old for the CP1500.** Buster ships
+   Gutenprint 5.3.3 (Sept 2018); the CP1500 hardware shipped Sept 2022.
+   Verify before starting code by SSHing to the live booth and running
+   `lpinfo --make-and-model "Canon CP1500" -m | grep -i cp1500`. If
+   empty, build Solomon Peachy's standalone `selphy_print` from source
+   (https://git.shaftnet.org/cgit/selphy_print.git/) — small C build,
+   no Python deps, registers as a CUPS backend.
+2. **Pi3-class CPU on the live booth.** Dye-sub data streams are
+   ~10–20 MB per 4×6; CUPS rasterization can take 5–15 s on older ARM.
+   Mitigation: fire `_do_photo_print` early, in parallel with upload.
+3. **`expand_for_print` has never run in production.** If any active
+   template has `columns > 1` and the geometry was authored without
+   testing the 4×6 output, the first print may have unexpected margins.
+   Mitigation: dry-run with `lp -o job-hold-until=indefinite` during
+   initial bring-up.
+4. **Ribbon/paper exhaustion is silent in the UI.** CP1500 has a
+   fixed-count consumable. Out of scope for the initial PR; worth a
+   follow-up that polls `lpstat -W not-completed` and lights a panel
+   LED on stall.
+
+### Reference
+
+Full plan including file-by-file change list lives at
+`/home/ian/.claude/plans/how-easily-could-we-zazzy-whistle.md`. The
+two-class rationale and the CUPS-via-`lp` decision are captured in
+ARCHITECTURE.md under "Printers".
+
+### Doc-vs-code drift (2026-06-16)
+
+ARCHITECTURE.md already documents the post-rename world
+(`ThermalPrinter` / `PhotoPrinter`, `thermal_printer.py` /
+`photo_printer.py`, `THERMAL_PRINTER_MAP` / `PHOTO_PRINTER_MAP`,
+`Booth.add_thermal_printer` / `add_photo_printer`, plus the
+`test_thermal_printer.py` / `test_photo_printer.py` test files), but
+the runtime still ships as `photobooth/printer.py` with the original
+`Printer` class, `PRINTER_MAP`, `Booth.add_printer`, and
+`tests/test_printer.py`. The rename was pre-staged in docs while this
+workstream was scoped; when the implementation lands, ARCHITECTURE.md
+needs no further changes — the rename should match what's already
+written. If priorities push the rename further out, consider walking
+the doc back to the current `printer.py` naming so a reader doesn't
+trip on the mismatch.

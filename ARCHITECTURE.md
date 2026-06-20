@@ -19,14 +19,25 @@ photobooth/           ← installable Python package
     rpi.py            ← RPi(Booth) — GPIO interrupt → asyncio event bridge
     camera.py         ← Camera — gphoto2 wrapper, async capture, per-camera startup config
     neopixel.py       ← Neopixel — ws281x panel animations (scroll, twinkle, rainbow…)
-    printer.py        ← Printer — ESC/POS receipt printer (PBM-8350U)
+    thermal_printer.py← ThermalPrinter — ESC/POS receipt printer (PBM-8350U).
+                         Renamed from the older `printer.py` / `Printer` once
+                         a second printer class was added; the old name was
+                         silently opinionated to a thermal device.
+    photo_printer.py  ← PhotoPrinter — CUPS-backed dye-sub photo printer
+                         (Canon Selphy CP1500). Shells out to `lp` — no
+                         Python CUPS bindings, keeps Buster/Py3.7 happy.
     uploader.py       ← Uploader — S3 upload, presigned URL, randomised key paths
     strip.py          ← PhotoStrip — Pillow compositor; supports multi-column tiling
     template_loader.py← TemplateLoader ABC + LocalTemplateLoader
     resources/        ← static assets: kiosk.sh, strip_test_template PNG/JSON, fonts
+    health.py         ← HealthMonitor — async probe registry + poll-based
+                         readiness tracking (v0.5.0)
+    state_store.py    ← atomic JSON file I/O for runtime state (v0.5.0)
+    upload_queue.py   ← UploadQueue — persistent FIFO for deferred S3
+                         uploads (v0.5.0)
   photobooth_web/     ← Django web app (kiosk browser target)
     mainscreen/       ← views: attract, last_capture, single_final, series_final,
-                         series_capture
+                         series_capture, unavailable
 ```
 
 ---
@@ -41,7 +52,8 @@ PhotoBooth (booth_main.py)
 │   ├── next_event()              await next GPIO event string from queue
 │   ├── add_camera()              → Camera
 │   ├── add_neopixel()            → Neopixel
-│   └── add_printer()             → Printer
+│   ├── add_thermal_printer()     → ThermalPrinter   (receipt / QR)
+│   └── add_photo_printer()       → PhotoPrinter     (4×6 dye-sub)
 │
 ├── Camera (camera.py)
 │   ├── __init__(model, startup_config=None)
@@ -93,15 +105,30 @@ points: start of `_review_shot()`, start of `_series_capture_review()`, return t
 |---|---|
 | Pillow compositing (`PhotoStrip.compose`) | `loop.run_in_executor(None, fn, ...)` |
 | Image compression (`_compress_image`) | `loop.run_in_executor(None, fn, ...)` |
-| ESC/POS receipt printing (`_do_print`) | `loop.run_in_executor(None, fn, ...)` |
+| ESC/POS receipt printing (`_do_thermal_print`) | `loop.run_in_executor(None, fn, ...)` |
+| CUPS photo printing (`_do_photo_print`) | `loop.run_in_executor(None, fn, ...)` — `lp` subprocess |
 | gphoto2 capture (`capture_async`) | `asyncio.create_subprocess_exec` |
 
 ### Background tasks
 
 - **Attract scroll** — runs as an `asyncio.Task`; cancelled on capture start, recreated
   when the booth returns to attract.
-- **S3 upload** — runs as an `asyncio.Task` started immediately after the final screen
-  is shown, so the user sees the result while the upload completes in parallel.
+- **S3 upload** — sequential with a 5 s wall-clock cap (`Uploader.upload_with_timeout`).
+  On success, the receipt prints with the public QR. On timeout/error, the capture is
+  added to the persistent `UploadQueue` and the receipt prints with a "pending upload"
+  notice + the deterministic QR URL; the URL works once `_upload_queue_worker` drains
+  it. See [Offline Uploads](#offline-uploads).
+- **Reaction phrase scroll** — Phase 2 launches the post-capture phrase as a
+  detached `self._phrase_task` so `display_url(REVIEW_URL)` can navigate the
+  kiosk to the review screen in parallel. `_review_shot` cancels + awaits
+  the task before returning so the panel is idle by the next state transition.
+- **`HealthMonitor.recheck_loop`** — re-probes any component currently in the
+  `unavailable` state every `HEALTH_RECHECK_INTERVAL` seconds (default 10 s).
+  Started at the tail of `_startup` and runs for the booth's lifetime.
+  See [Health Monitoring & Recovery](#health-monitoring--recovery).
+- **`_upload_queue_worker`** — drains the `UploadQueue` while `HealthMonitor`
+  reports `net_www` ready. Exponential backoff from 5 s to 5 min on failure.
+  Started at the tail of `_startup`; cancellable.
 
 ### Browser navigation (CDP)
 
@@ -130,6 +157,359 @@ code changes are required.
 
 ---
 
+## Health Monitoring & Recovery
+
+`photobooth/health.py` introduces `HealthMonitor`, the booth's source of
+truth for "is component X usable right now?". Every hardware and
+connectivity dependency is registered with an async **probe** callable
+returning `bool`; the monitor invokes the probe on demand and tracks the
+latest state on a `ComponentHealth` record (`name`, `state`, `last_error`,
+`last_checked`).
+
+### Probe registry
+
+Probes are owned by the module that owns the hardware:
+
+| Component | Probe | Module |
+|---|---|---|
+| `web` | `probe_web_available()` | `booth.py` |
+| `neopixel` | `probe_neopixel_available(control)` | `neopixel.py` |
+| `camera` | `probe_camera_available(model)` | `camera.py` |
+| `printer` | `probe_printer_available(model)` | `printer.py` |
+| `net_local` | `probe_local_network()` | `booth.py` |
+| `net_www` | `probe_internet_available(host)` | `booth.py` |
+
+Each probe is wrapped in try/except inside `HealthMonitor._probe_once`,
+so a probe that raises is treated as `False` and the exception repr is
+stored on `ComponentHealth.last_error`.
+
+`probe_camera_available` is layered for correctness: it first runs
+`gphoto2 --auto-detect` to confirm the model is on the USB bus, then
+issues `gphoto2 --summary` (5 s subprocess timeout) to force a real PTP
+roundtrip. The double-check is load-bearing — a Canon T7i in a half-
+failed state stays USB-enumerated after power loss but cannot capture,
+and a freshly powered-on body needs a few seconds before PTP responds.
+Without the summary check the recheck loop would flip `camera` back to
+`ready` while captures still returned phantom 0-byte files.
+
+### Startup wait
+
+`_startup()` calls `register(name, probe)` then
+`wait_until_ready(name, *, timeout=..., interval=1.0)` for each
+dependency. The monitor polls every `interval` seconds until the probe
+returns ready (or `timeout` elapses) and emits a single
+`Waiting for <name>` INFO line on the first failure so the systemd
+journal records exactly which dependency the service is blocked on.
+
+| Component | Constant | Default | On miss |
+|---|---|---|---|
+| web | `HEALTH_TIMEOUT_WEB` | 30 s | raise → systemd restart |
+| neopixel | `HEALTH_TIMEOUT_NEOPIXEL` | 300 s | raise → systemd restart |
+| camera | `HEALTH_TIMEOUT_CAMERA` | 300 s | raise → systemd restart |
+| printer | `HEALTH_TIMEOUT_PRINTER` | 300 s | raise → systemd restart |
+| net_local | `HEALTH_TIMEOUT_NET_LOCAL` | 5 s | log + continue (degraded) |
+| net_www | `HEALTH_TIMEOUT_NET_WWW` | 5 s | log + continue (degraded) |
+
+`_init_with_retry(name, factory)` covers the boundary case where the
+probe passes but the constructor (e.g. `add_camera`) still raises — it
+re-awaits `wait_until_ready(name, timeout=None)` and tries again.
+
+### Recheck loop
+
+`HealthMonitor.recheck_loop(interval=HEALTH_RECHECK_INTERVAL)` runs as a
+background `asyncio.Task` launched at the tail of `_startup`. It re-
+probes any component currently in the `unavailable` state every
+`interval` seconds. Components in `ready` or `unknown` are not
+re-probed — readiness is owned by the original caller of
+`wait_until_ready`. Every state transition emits a `StateChange` record
+on `HealthMonitor.state_changes` (an `asyncio.Queue`) so downstream
+consumers can react to recovery events without polling.
+
+### Unavailable mode + resume
+
+A runtime failure of a required hardware component routes through
+`PhotoBooth._enter_unavailable(component, scroll_text)`:
+
+1. Queued GPIO events from the failure transient are drained so a
+   held / double-bounced press doesn't auto-skip the recovery before
+   the user can see it.
+2. The kiosk navigates to `UNAVAILABLE_URL`
+   (`/main/unavailable/` → `unavailable.html` → `unavailable.png`).
+3. A continuous red scroll on the neopixel announces the diagnosis
+   (`"Camera not detected. Check power and USB."` for camera,
+   `"Printer not responding"` for printer).
+4. The flow awaits `HealthMonitor.wait_until_ready(component, timeout=None)`.
+5. On probe-success, the screen + scroll hold for
+   `UNAVAILABLE_MIN_HOLD_SECONDS = 2.5 s` measured from step 1 — without
+   the pad, a power-cycled camera that re-enumerates in <1 s would flash
+   the unavailable screen by before the user could register it.
+6. Scroll task cancelled, panel cleared, queued events drained again
+   (so presses during the hold don't consume the first input of the
+   recovered state), and control returns to the caller — which
+   re-issues the failed operation.
+
+**Stale USB handle recovery.** Power-cycling a USB device re-enumerates
+it and assigns a new bus/dev address; the cached handles in `Camera`
+(`self.addr`) and `Printer` (the escpos `Usb` wrapper) become dead
+even though the corresponding probes report ready. The recovery
+callers refresh them before retrying:
+
+- `_take_one_shot` calls `Camera.refresh_address()` after
+  `_enter_unavailable` returns — re-runs `get_cameras()` and updates
+  `self.addr` so the next `gphoto2 --port` targets the live device.
+- `_print_with_recovery` calls `Printer.reconnect()` (rebuilds
+  `self.printer = Usb(**self._config)`) before its retry print.
+
+Both methods are no-ops on the fast path (when no power cycle has
+happened) and degrade gracefully (log + return `False`) when the
+refresh itself raises.
+
+**Internet / S3 failures never enter unavailable mode** — they are
+handled entirely by the offline-upload path so the booth stays fully
+operable for capture + receipt printing during connectivity outages.
+
+`_print_with_recovery(url, pending_notice, post_recovery_url)` takes a
+`post_recovery_url` so the kiosk lands on the right screen after
+`_enter_unavailable` exits and before the retry print fires — the
+unavailable-mode handler leaves the browser parked on `unavailable.png`,
+so callers pass the screen the user was on at the moment of failure
+(capture path: `final_url`; reprint path: `ATTRACT_URL`) to keep the
+kiosk and LED panel in sync.
+
+#### Resume state file
+
+Before any capture, `_take_one_shot(resume_context=...)` persists a
+record to `RESUME_STATE_PATH` (default `/var/lib/photobooth/resume.json`,
+override with `BOOTH_RESUME_STATE_PATH`). The record carries:
+
+| Field | Meaning |
+|---|---|
+| `mode` | `"single"` or `"series"` |
+| `pending_step` | the step currently in flight (`"capture"`) |
+| `series_shots` | list of paths already kept this session (series only) |
+| `shot_index` | 1-based index of the shot in flight (series only) |
+| `total` | total shots in the active template (series only) |
+| `template_name` | active template folder name |
+
+On clean session completion, `_clear_resume_state()` deletes the file.
+On a fresh process start with a `resume.json` present, `_resume_from`
+navigates the kiosk to the between-shots page with
+`?mode=series&shot=X&total=N` so the operator sees where they left off;
+the next blue-button event re-enters `_run_series` with
+`starting_shots=series_shots` and the partial series picks up at the
+failed slot.
+
+Resume is **series-mode only** — a single-shot interruption has no
+partial state worth preserving.
+
+#### Atomic JSON I/O
+
+`photobooth/state_store.py` is the shared file-I/O layer used by both
+`resume.json` and `upload_queue.json`:
+
+- `load_json(path)` — returns `{}` on a missing file (no raise); other
+  errors (malformed JSON, permission failures) propagate so real bugs
+  aren't masked.
+- `save_json_atomic(path, data)` — serializes to `<path>.tmp`, `fsync`s
+  the temp file, `os.replace`s it onto `path`, then `fsync`s the
+  containing directory. A crash mid-write leaves the previous (good)
+  file intact.
+- `delete_if_exists(path)` — silent no-op on missing file.
+
+All callers open + close per operation — there are no long-held handles
+or in-memory authoritative copies.
+
+---
+
+## Offline Uploads
+
+`photobooth/upload_queue.py` introduces `UploadQueue`, a JSON-backed FIFO
+queue that holds captures whose S3 upload didn't complete within the 5 s
+wall-clock cap. The QR code on the printed receipt still works because
+`Uploader.public_url(key)` is deterministic on the key — the queued
+upload eventually places the object at exactly the path the QR encoded
+at print time.
+
+### Capture-time path
+
+The capture flow shows the composite immediately and runs
+`_upload_or_enqueue` as a background task while the user views their
+photo:
+
+```python
+await self.display_url_with_context(final_url, ...)          # composite shows now
+upload_task = asyncio.create_task(self._upload_or_enqueue(image_path))
+decision = await asyncio.wait_for(self.rpi.next_event(), timeout=60)
+qr_url, pending_notice = await upload_task                   # almost always already done
+```
+
+By the time the user reacts (a few seconds of look-time), the upload
+task has typically completed; the `await upload_task` before the print
+branch costs nothing in the common case and at most `UPLOAD_TIMEOUT_SECONDS`
+in the worst case. The QR target is deterministic (`public_url(make_key(...))`
+is computed inside `_upload_or_enqueue` before any S3 traffic), so the
+receipt is always correct.
+
+`PhotoBooth._upload_or_enqueue(image_path)` itself:
+
+1. `make_key(image_path)` builds the deterministic S3 key.
+2. `public_url(key)` is stashed up front and used as the receipt QR
+   target regardless of whether the upload completes.
+3. **Short-circuit:** if `HealthMonitor.is_ready("net_www")` is False,
+   skip the upload attempt entirely, enqueue immediately, and return
+   `(qr_url, PENDING_UPLOAD_NOTICE)`. Necessary because boto3's
+   blocking executor call can wedge past `asyncio.wait_for` when DNS
+   itself is unreachable, which previously stranded the booth on the
+   final screen with no receipt and no consumed input events.
+4. A continuous "Uploading..." scroll starts on the neopixel.
+5. `Uploader.upload_with_timeout(path, key, timeout_s=5.0)` runs.
+6. On success: scroll cancelled, control returns with `(qr_url, None)`.
+7. On `asyncio.TimeoutError` or any other `boto3` exception:
+   `UploadQueue.enqueue(key, image_path)` is called; the receipt
+   `pending_notice` is set to `PENDING_UPLOAD_NOTICE`
+   (`"* Photo upload pending - your QR will work once the booth
+   reconnects to the internet."`) which `_do_print` renders under the
+   QR code. The same path also force-probes `net_www` so the recheck
+   loop owns the recovery flip (instead of the queue worker hammering
+   a known-bad link).
+
+The receipt prints either way; the booth never blocks the user for more
+than 5 s on a slow link.
+
+### Queue file
+
+| Path | Default | Override |
+|---|---|---|
+| Upload queue | `/var/lib/photobooth/upload_queue.json` | `BOOTH_UPLOAD_QUEUE_PATH` |
+| Resume state | `/var/lib/photobooth/resume.json` | `BOOTH_RESUME_STATE_PATH` |
+
+On-disk shape:
+
+```json
+{
+  "items": [
+    {
+      "key": "booth/2026/06/16/aB3xK9p2_20260616-12h30m00s-000001.jpg",
+      "image_path": "/opt/booth_images/20260616-12h30m00s-000001.jpg",
+      "enqueued_at": 1750000000.0,
+      "attempts": 2,
+      "last_error": "...",
+      "last_attempted_at": 1750000150.0
+    }
+  ]
+}
+```
+
+The top-level object (rather than a bare list) leaves room for future
+metadata (schema version, last-drain timestamp) without a migration.
+Per-item `attempts` / `last_error` / `last_attempted_at` survive
+reboots so the worker doesn't "forget" failure history after a restart.
+
+### Drain worker
+
+`PhotoBooth._upload_queue_worker()` is started in `_startup` as a
+background `asyncio.Task` that runs for the booth's lifetime. The loop:
+
+1. `peek()` the queue head. Empty? Sleep `UPLOAD_WORKER_BACKOFF_INITIAL`
+   (5 s) and reset backoff.
+2. Check `HealthMonitor.is_ready("net_www")`. If not ready, sleep and
+   double the backoff, capped at `UPLOAD_WORKER_BACKOFF_CAP` (300 s).
+3. Call `Uploader.upload(item.image_path, key=item.key)`. On success,
+   `pop(key)`, reset backoff. On failure, `mark_attempt(key, err)`,
+   force a `net_www` re-probe (so `recheck_loop` is the one to flip it
+   back to `ready` when the link recovers), sleep, double the backoff.
+
+The deterministic-key invariant matters: the worker reuses the
+`item.key` that was stashed at enqueue time, so the receipt QR printed
+during the outage and the object eventually uploaded after recovery
+share the same URL — no QR rewrites, no "your link will be different"
+explanations.
+
+### Provisioning prerequisite
+
+`/var/lib/photobooth/` must exist and be writable by the `pi` user.
+`rpi_provisioning/booth_boot/init_setup.sh` creates it at provision
+time; existing booths upgrading to v0.5.0 need
+`sudo install -d -o pi -g pi /var/lib/photobooth` once before the first
+restart.
+
+---
+
+## Printers
+
+The booth drives two physically and protocol-distinct printers. They share
+nothing at the wire level, so they are modelled as two separate classes
+rather than a single `PrinterBackend` ABC — forcing a common interface
+would collapse to a single `print_something()` method that means different
+things on each side, which hurts more than it helps.
+
+| Class | Module | Device | Protocol | Backend |
+|---|---|---|---|---|
+| `ThermalPrinter` | `thermal_printer.py` | PBM-8350U thermal receipt printer | ESC/POS over raw USB endpoint | `python-escpos` → `escpos.printer.Usb` |
+| `PhotoPrinter` | `photo_printer.py` | Canon Selphy CP1500 dye-sub photo printer | CUPS print queue | system `lp` binary via `subprocess` |
+
+### Why `ThermalPrinter` (renamed from `Printer`)
+
+The original `printer.py` / `Printer` class predates any plan to add a
+second printer. Its constructor, `PRINTER_MAP`, and entire method surface
+(`text`, `ln`, `cut`, `qr`, `barcode`) are opinionated to a thermal
+receipt device and are thin wrappers around `escpos.printer.Usb`. Once a
+second printer class entered the design, the bare name `Printer` became
+actively misleading — anyone reading `self.printer.qr(...)` would
+reasonably assume the printer abstraction is generic, when in fact it
+hard-binds to ESC/POS.
+
+The rename `Printer` → `ThermalPrinter`, `PRINTER_MAP` → `THERMAL_PRINTER_MAP`,
+and `Booth.add_printer` → `Booth.add_thermal_printer` makes the protocol
+coupling visible at every call site. The receipt-printing code path is
+otherwise unchanged.
+
+### `PhotoPrinter` — CUPS via `lp`
+
+`PhotoPrinter` does not import `pycups`. It shells out to the system `lp`
+binary via `subprocess.run`. Two reasons:
+
+1. **No C-extension build on Buster/Py3.7.** The live booth's Python is
+   3.7 on Buster; `rawpy` already failed to build there (see auto-memory).
+   Adding a second compiled dependency for what amounts to `lp -d <queue>
+   <file>` would be gratuitous.
+2. **CUPS is already the integration surface.** The CP1500 driver
+   (Gutenprint's `selphy_print` backend, or Solomon Peachy's standalone
+   build on Buster — see BACKLOG) lives behind a CUPS queue. Whatever
+   talks to `lp` is portable across driver versions for free.
+
+Construction takes a CUPS queue name (e.g. `Canon_Selphy_CP1500`) plus a
+model key into `PHOTO_PRINTER_MAP` that carries default `lp` options
+(`media=Postcard.Fullbleed`, fit-to-page, etc.). At startup,
+`_verify_queue()` calls `lpstat -p <queue>` and raises if the queue is
+missing — fail fast rather than discover at first print.
+
+### Wiring into the capture flow
+
+```
+PhotoStrip.compose(shots, strip_path)        ← single-strip JPEG  (S3 + kiosk review)
+PhotoStrip.expand_for_print(strip_path,      ← column-tiled JPEG  (print only)
+                            print_path)
+ThermalPrinter.qr(url) / .text(...) / .cut() ← receipt with QR
+PhotoPrinter.print_image(print_path)         ← lp -d <queue> -o media=... <file>
+```
+
+Receipt and photo prints run as **independent** `run_in_executor` calls
+from the final-screen handler — they are fired in parallel since the
+devices share no resource. A failure in either path is logged and
+swallowed so a paper jam on one printer never blocks the other (or the
+booth's return to attract).
+
+### CP1500 system prerequisites (per Pi, one-time)
+
+CUPS + Gutenprint (plus the queue definition) are not Python deps and
+are not handled by `pip install`. They are documented under "Installing
+on a Pi" in the package README, and the BACKLOG entry for the CP1500
+workstream tracks the Buster-specific Gutenprint version risk
+(CP1500 hardware postdates Buster's apt Gutenprint package).
+
+---
+
 ## Template System
 
 ### Screen overlays (`photobooth_web/mainscreen/static/img/`)
@@ -143,10 +523,11 @@ shows the latest capture.
 | File | Screen |
 |---|---|
 | `attract_static.png` | Attract / idle |
-| `last_capture.png` | Per-shot review overlay |
+| `last_capture.png` | Per-shot review overlay (1215×810 transparent aperture for the photo) |
 | `series_capture.png` | Between-shots instruction page (series mode) |
 | `series_final.png` | Composited strip displayed before upload |
 | `single_final.png` | Final single-shot overlay before upload |
+| `unavailable.png` | Hardware-unavailable screen (Phase 5) |
 | `nolast.jpg` | Fallback placeholder when no shot exists |
 
 ### Compositor templates (`/opt/photobooth/templates/`)
@@ -213,9 +594,11 @@ If `columns <= 1`, no duplication is needed and the method is a pass-through:
 `input_path` is returned unchanged and no file is written. Callers can use the
 returned path unconditionally without branching on column count.
 
-Not currently invoked from `booth_main.py` — the receipt printer only prints a
-thermal QR receipt today. When a 4×6 photo-printer integration is added, the
-print path will call `expand_for_print()` before sending bytes to the printer.
+Called from `booth_main.py` immediately after `compose()` whenever a
+`PhotoPrinter` is online; the resulting print-ready file is what
+`PhotoPrinter.print_image()` hands to `lp`. The single-strip output from
+`compose()` stays the source of truth for the S3 upload and the kiosk
+review screen — only the print path uses the column-tiled variant.
 
 ### Mode selection (`booth_main.py` constants)
 
@@ -258,37 +641,48 @@ flowchart TD
     ATTRACT(["Attract Mode"])
     ATTRACT -->|"blue btn"| COUNTDOWN
 
-    COUNTDOWN["Countdown 3…2…1…Smile!\n+ NeoPixel twinkle\n+ reaction phrase scroll"]
-    COUNTDOWN --> CAPTURE["Camera Capture\n+ compress in-place"]
-    CAPTURE --> REVIEW
+    COUNTDOWN["Countdown 3…2…1 (1.2 s)\n+ NeoPixel twinkle"]
+    COUNTDOWN --> CAPTURE["Camera Capture (Phase 1)\n+ Smile! scroll 0.8 s in parallel\n→ compress in-place"]
+    CAPTURE --> PHRASE["Reaction phrase scroll\n(detached background task)"]
+    PHRASE --> REVIEW
 
-    REVIEW["Review\nlast_capture overlay\nphoto behind PNG frame"]
+    REVIEW["Review (Phase 2 parallel)\nlast_capture overlay\nphoto behind 1215×810 aperture"]
     REVIEW -->|"red btn — redo"| ATTRACT
     REVIEW -->|"blue / green btn — keep"| KEEP_GATE{Active\ntemplate?}
 
-    KEEP_GATE -->|"None"| FINAL
+    KEEP_GATE -->|"None"| UPLOAD
     KEEP_GATE -->|"shot_count = 1"| COMPOSE["Compose single_final\n(run_in_executor)"]
-    COMPOSE --> FINAL
+    COMPOSE --> UPLOAD
+
+    UPLOAD["_upload_or_enqueue (Phase 6)\nUploading... scroll (5 s cap)"]
+    UPLOAD -->|"success"| FINAL
+    UPLOAD -->|"timeout/error"| QUEUE["UploadQueue.enqueue(key, path)\npending_notice = on"]
+    QUEUE --> FINAL
 
     FINAL["single_final screen\n60 s hold"]
-    FINAL -->|"blue / green — print"| PRINT["Upload S3 + Print receipt + QR"]
-    FINAL -->|"red / timeout"| UPLOAD_ONLY["Upload S3 only"]
+    FINAL -->|"blue / green — print"| PRINT["Receipt + QR\n(notice under QR if queued)"]
+    FINAL -->|"red / timeout"| ATTRACT
     PRINT --> ATTRACT
-    UPLOAD_ONLY --> ATTRACT
+
+    CAPTURE -.->|"hardware fail"| UNAVAIL
+    PRINT -.->|"printer fail"| UNAVAIL
+    UNAVAIL["Unavailable mode (Phase 5)\nUNAVAILABLE_URL +\nred error scroll +\nawait wait_until_ready"]
+    UNAVAIL -.->|"component returns"| REVIEW
 ```
 
 ### Series mode
 
 ```mermaid
 flowchart TD
-    ATTRACT(["Attract Mode"])
+    ATTRACT(["Attract Mode\n+ banner: N photos for the series"])
     ATTRACT -->|"blue btn"| COUNTDOWN
 
-    COUNTDOWN["Countdown 3…2…1…Smile!\n+ NeoPixel twinkle\n+ reaction phrase scroll"]
-    COUNTDOWN --> CAPTURE["Camera Capture\n+ compress in-place"]
-    CAPTURE --> REVIEW
+    COUNTDOWN["Countdown 3…2…1 (1.2 s)\n+ NeoPixel twinkle"]
+    COUNTDOWN --> CAPTURE["Camera Capture (Phase 1)\n+ Smile! scroll 0.8 s in parallel\n→ compress in-place\n+ save resume.json (Phase 5)"]
+    CAPTURE --> PHRASE["Reaction phrase scroll\n(detached background task)"]
+    PHRASE --> REVIEW
 
-    REVIEW["Review\nlast_capture overlay"]
+    REVIEW["Review (Phase 2 parallel)\nlast_capture overlay\n+ banner: Shot X of N (Phase 7)"]
     REVIEW -->|"red btn — redo"| SERIES_PAGE
     REVIEW -->|"blue / green btn — keep"| APPEND["Append shot to list"]
 
@@ -296,23 +690,61 @@ flowchart TD
     NEXT_OR_DONE -->|"Yes"| COMPOSE
     NEXT_OR_DONE -->|"No"| SERIES_PAGE
 
-    SERIES_PAGE["series_capture page\n(between-shots instructions)\nflush queued presses"]
+    SERIES_PAGE["series_capture page\n+ banner: Next shot: X of N\nflush queued presses"]
     SERIES_PAGE -->|"blue — continue"| COUNTDOWN
     SERIES_PAGE -->|"red — start over"| ATTRACT
     SERIES_PAGE -->|"green — show last shot"| RESHOW
 
-    RESHOW["Re-review last kept shot\nlast_capture overlay\nflush queued presses"]
+    RESHOW["Re-review last kept shot\nflush queued presses"]
     RESHOW -->|"blue / green — keep"| SERIES_PAGE
     RESHOW -->|"red — redo that slot"| POP["Pop last shot from list"]
     POP --> COUNTDOWN
 
-    COMPOSE["Compose strip\n(run_in_executor)\ncolumn-tile if columns > 1"]
-    COMPOSE --> FINAL["series_final screen\n60 s hold"]
-    FINAL -->|"blue / green — print"| PRINT["Upload S3 + Print receipt + QR"]
-    FINAL -->|"red / timeout"| UPLOAD_ONLY["Upload S3 only"]
+    COMPOSE["Compose strip\n(run_in_executor)\nexpand_for_print if columns > 1"]
+    COMPOSE --> UPLOAD["_upload_or_enqueue (Phase 6)\nUploading... scroll (5 s cap)"]
+    UPLOAD -->|"success"| FINAL
+    UPLOAD -->|"timeout/error"| QUEUE["UploadQueue.enqueue\npending_notice = on"]
+    QUEUE --> FINAL
+
+    FINAL["series_final screen\n60 s hold"]
+    FINAL -->|"blue / green — print"| PRINT["Receipt + QR\n(notice under QR if queued)"]
+    FINAL -->|"red / timeout"| ATTRACT
     PRINT --> ATTRACT
-    UPLOAD_ONLY --> ATTRACT
+
+    CAPTURE -.->|"hardware fail"| UNAVAIL
+    PRINT -.->|"printer fail"| UNAVAIL
+    UNAVAIL["Unavailable mode (Phase 5)\nUNAVAILABLE_URL +\nred error scroll +\nawait wait_until_ready"]
+    UNAVAIL -.->|"camera returns"| SERIES_PAGE
+    UNAVAIL -.->|"printer returns"| PRINT
 ```
+
+### Banner overlay (series mode)
+
+The "Shot X of N" / "Next shot: X of N" / "N photos will be taken for
+the series" overlays are pure-CSS bands rendered on top of
+`attract_static.png`, `last_capture.png`, and `series_capture.png`.
+Banner context is passed from `booth_main` to the Django views as URL
+query parameters — there is no shared in-memory state between the
+runtime and the kiosk browser.
+
+```
+PhotoBooth.display_url_with_context(URL, **_series_params(shot=X))
+    → http://.../main/<screen>/?mode=series&total=N&shot=X
+        → views.<screen>(request)
+            → _series_context(request) coerces mode/total/shot
+                → template: {% if mode == "series" %}<div class="series-banner">…
+```
+
+`_series_params(shot=...)` lives on `PhotoBooth`; it reads
+`self.strip.shot_count` to decide `mode` and `total`. `display_url`
+calls without context default to `mode=single`. `_review_shot` forces
+`mode=single` on the in-series re-review path so the banner stays
+hidden when the user is re-inspecting a kept shot.
+
+CSS variables on `:root` in `static/css/series-banner.css` control the
+banner's max area (`y∈[945,1075]`, `x∈[250,1675]`), vertical padding
+(MIN 10 px, do not lower), font size, colour, and shadow. Future
+tuning is a single-file edit; no template changes needed.
 
 ---
 
@@ -367,10 +799,10 @@ python3 -m pytest                  # full suite
 python3 -m pytest tests/test_<x>   # one file
 ```
 
-96 tests across 9 files as of v0.4.1. No Pi hardware required at test time;
-hardware deps (`RPi.GPIO`, `neopixel`, `board`) are guarded by `try/except
-ImportError` in `__init__.py`. The few tests that need `board` (`test_booth_main_env`,
-`test_series_flow`) stub it via `sys.modules` before importing `booth_main`.
+No Pi hardware required at test time; hardware deps (`RPi.GPIO`,
+`neopixel`, `board`) are guarded by `try/except ImportError` in
+`__init__.py`. The few tests that need `board` stub it via `sys.modules`
+before importing `booth_main`.
 
 | Test file | Covers |
 |---|---|
@@ -382,8 +814,23 @@ ImportError` in `__init__.py`. The few tests that need `board` (`test_booth_main
 | `test_booth_main_env.py` | Defaults + overrides for all 6 `BOOTH_*` constants. |
 | `test_env_example_consistency.py` | Cross-repo: every `BOOTH_*` key in `rpi_provisioning/booth_boot/resources/booth.env.example` is consumed by `booth_main` / `logging_config`, and vice versa. Catches doc-vs-code drift. |
 | `test_camera.py` | `run_local_cmd` (error path → `logger.error`), `_build_filename`, `check_gphoto2`, `check_dir_rw_or_make`, `_read_exif_datetime` (never-raises guarantee). |
-| `test_printer.py` | `PRINTER_MAP` resolution (default + PBM-8350U), escpos passthroughs, `ln()` edge cases. `python-escpos`-gated. |
+| `test_thermal_printer.py` | `THERMAL_PRINTER_MAP` resolution (default + PBM-8350U), escpos passthroughs, `ln()` edge cases. `python-escpos`-gated. Renamed from `test_printer.py` alongside the `Printer` → `ThermalPrinter` rename. |
+| `test_photo_printer.py` | `PHOTO_PRINTER_MAP` resolution (default + CP1500), `lp` argv construction, job-ID parsing, missing-queue and missing-`lp` error paths. `subprocess.run` mocked end-to-end — no CUPS required at test time. |
 | `test_series_flow.py` | `PhotoBooth._series_capture_review` — all six scenarios (continue, start_over, undo-redo, undo-keep, re-affirm-keep, re-affirm-redo). Pins the buffer-after-re-review contract. |
+| `test_neopixel_scroll_duration.py` *(v0.5.0)* | `Neopixel.scroll_for_duration` derives per-frame speed so total wall-clock matches the requested duration within tolerance. |
+| `test_capture_timing.py` *(v0.5.0)* | End-to-end timing of `_take_one_shot`: button press → `capture_async` dispatch ≤ 2.0 s ±5%. |
+| `test_parallel_display.py` *(v0.5.0)* | `display_url(REVIEW_URL)` is scheduled before the post-capture reaction phrase task awaits its first sleep — the kiosk navigates while the phrase is still scrolling. |
+| `test_health_monitor.py` *(v0.5.0)* | `HealthMonitor.register` / `wait_until_ready` / `recheck_loop` / `state_changes` transitions; probe-raise treated as `False`; timeout returns `False` without raising. |
+| `test_startup_dependency_wait.py` *(v0.5.0)* | `_startup` waits for camera probe to succeed before construction; does not raise on initial unavailability; required vs optional component handling. |
+| `test_state_store.py` *(v0.5.0)* | `load_json` returns `{}` on missing file; `save_json_atomic` survives a simulated mid-write crash (`os.replace` patched to raise) without corrupting the original file. |
+| `test_unavailable_mode.py` *(v0.5.0)* | Camera-raise drives `display_url(UNAVAILABLE_URL)`, red scroll, and `wait_until_ready("camera")`; on ready, resumes at the failed step. |
+| `test_resume_mid_series.py` *(v0.5.0)* | 3-shot series with shot 3 failing: resume reloads `series_shots` of length 2 and navigates to `series_capture?shot=3&total=3`. |
+| `test_upload_queue.py` *(v0.5.0)* | `enqueue` / `peek` / `pop` / `list` / `mark_attempt` round-trip; atomic write survives simulated mid-write crash. |
+| `test_upload_offline_flow.py` *(v0.5.0)* | `upload_with_timeout` raising `TimeoutError` enqueues the capture; QR URL is `public_url(key)`; `pending_notice` reaches `_do_print`. |
+| `test_upload_queue_worker.py` *(v0.5.0)* | Worker drains the queue while `net_www` is ready; popping leaves queue file empty; failed upload flips `net_www` to `unavailable` and backs off. |
+| `test_display_url_with_context.py` *(v0.5.0)* | Series flow drives `display_url` with the correct `?mode=series&total=N&shot=X` for each state transition. |
+| `test_series_overlay_views.py` *(v0.5.0)* | Django views render the banner div only when `mode=series` is in the query string; text matches expected per-screen template. |
+| `mainscreen/tests.py` *(v0.5.0)* | Last-capture template emits the new `width:1215px; height:810px; object-fit:cover` aperture geometry. |
 
 Hardware-tied "tests" (`tests/blink_thread.py`, `cntdwn_np_test.py`, etc.) are
 manual scripts run on the live booth; pytest ignores them via `addopts =

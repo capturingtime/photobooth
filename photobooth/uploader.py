@@ -74,6 +74,29 @@ class Uploader:
         """
         return f"http://{self._bucket_name}/{key}"
 
+    async def upload_with_timeout(
+        self,
+        image_path: str,
+        key: Optional[str] = None,
+        timeout_s: float = 5.0,
+    ) -> str:
+        """Upload with a hard wall-clock timeout.
+
+        Wraps ``upload`` in ``asyncio.wait_for`` so the booth never blocks
+        the capture flow for more than ``timeout_s`` on a slow/dead link.
+        On timeout, ``asyncio.TimeoutError`` propagates; the caller's
+        offline path (Phase 6) catches it and enqueues for later.
+
+        The underlying executor task is cancelled by ``wait_for`` — boto3
+        itself ignores the cancellation (it's running in a thread), but
+        the foreground awaitable returns immediately so the capture flow
+        proceeds without waiting on the executor.
+        """
+        return await asyncio.wait_for(
+            self.upload(image_path, key=key),
+            timeout=timeout_s,
+        )
+
     async def upload(self, image_path: str, key: Optional[str] = None) -> str:
         """Upload a local file to S3 and return a presigned download URL.
 

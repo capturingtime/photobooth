@@ -1,8 +1,47 @@
 # Photobooth
 
 Raspberry Pi 4B photobooth framework for Capturing Time Photography. Supports
-single-shot and multi-shot strip modes with per-shot review, S3 upload, and ESC/POS
-receipt printing.
+single-shot and multi-shot strip modes with per-shot review, S3 upload, ESC/POS
+receipt printing, and (planned) Canon Selphy CP1500 4×6 dye-sub photo printing
+via CUPS. See ARCHITECTURE.md → "Printers" and BACKLOG.md for the photo-printer
+workstream.
+
+## What's new in v0.5.0
+
+- **Faster countdown.** Blue button → shutter is ~3 s on the live booth
+  hardware (`3.../2.../1...` scrolls at deadline-paced ≈0.4 s each +
+  `Smile!` overlapping the gphoto2 capture).
+- **Photo on screen sooner.** The kiosk navigates to the review screen
+  in parallel with the LED reaction phrase, so the photo appears almost
+  immediately after the shutter.
+- **Composite shows immediately, uploads in the background.** The
+  series-final / single-final screen no longer waits on S3 — the user
+  sees their photo as soon as the strip is composed, and the upload
+  runs as a background task while they decide whether to print.
+- **Larger review-screen aperture.** Photos render into the redrawn
+  1215×810 aperture in `last_capture.png` / `single_final.png` with no
+  letterboxing.
+- **Boot survives missing hardware.** A new `HealthMonitor` polls each
+  component (camera, printer, neopixel, network) instead of raising on
+  the first failure. The booth waits up to 5 minutes per required
+  dependency and logs a single "Waiting for ..." line so the journal
+  is readable.
+- **Hardware fault → friendly screen instead of crash.** A camera unplug
+  or printer fault drops the booth onto an "unavailable" screen with a
+  red LED diagnosis; the in-flight series resumes at the failed shot
+  once the component returns.
+- **wifi outage doesn't block capture.** Uploads have a 5 s wall-clock
+  cap; on timeout the capture is added to a persistent on-disk queue
+  and the receipt still prints with a working QR (the S3 URL is
+  deterministic on the key) plus a "pending upload" notice. A
+  background worker drains the queue once connectivity returns.
+- **Series-mode banner overlay.** Attract, between-shots, and review
+  screens now display "X of N" context text driven by URL query params
+  from `booth_main`.
+
+The v0.5.0 upgrade is a single `pip install --force-reinstall`, plus a
+one-time `sudo install -d -o pi -g pi /var/lib/photobooth` on existing
+booths so the resume + upload-queue files have a home.
 
 ![Raspberry Pi Circuit Diagram](./img/RPi-4B-circuit-diagram.png "Raspberry Pi 4B")
 
@@ -11,7 +50,9 @@ receipt printing.
 - Raspberry Pi 4B (Raspberry Pi OS, Python 3.7+)
 - Canon EOS DSLR via USB / gphoto2
 - NeoPixel (ws281x) LED panel — 8×32
-- PBM-8350U thermal receipt printer (ESC/POS)
+- PBM-8350U thermal receipt printer (ESC/POS) — driven by `ThermalPrinter`
+- Canon Selphy CP1500 dye-sub photo printer (USB, CUPS + Gutenprint) — driven
+  by `PhotoPrinter` (planned; see BACKLOG.md)
 - Three momentary buttons on GPIO 23 (green), 24 (red), 25 (blue)
 
 ## Package Structure

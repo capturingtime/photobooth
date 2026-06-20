@@ -19,6 +19,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CAPTURE_DIR = "/opt/captures"
 
+# Below this byte count, a downloaded "capture" is almost certainly a stale
+# buffer frame or empty wakeup artifact (a real Canon JPEG is >1 MB). The
+# Phase 5 unavailable-mode path keys off the exception this triggers.
+MIN_VALID_CAPTURE_BYTES = 100_000
+
+
+class CameraCaptureError(RuntimeError):
+    """Raised when gphoto2 returns without a valid image on disk.
+
+    Bridges Phase 5: ``_take_one_shot`` catches this, ``_classify_error``
+    maps it to ``("camera", CAMERA_UNAVAILABLE_TEXT)``, and the booth
+    enters unavailable mode + waits for HealthMonitor recovery.
+    """
+
 
 def run_local_cmd(cmd: str):
     """Run a shell command synchronously. Used during init/config only."""
@@ -81,6 +95,47 @@ def get_cameras() -> list:
         model, addr = re.split(" {2,}", c)
         detected_cameras.append({"model": model, "addr": addr})
     return detected_cameras
+
+
+async def probe_camera_available(model: str) -> bool:
+    """Return True if gphoto2 sees ``model`` AND the camera answers a PTP query.
+
+    Used by ``HealthMonitor`` (v0.5.0 Phase 4) to decide whether the
+    booth can proceed past startup *or* resume capture after a failure.
+    Never raises — any error during detection is treated as "not
+    present" and the caller will retry.
+
+    USB enumeration (``--auto-detect``) is necessary but not sufficient:
+    the Canon T7i appears on the USB bus for several seconds after
+    power-on before its PTP layer is ready to capture, and a failed
+    camera mid-session can leave gphoto2 reporting "detected" while
+    actual captures return phantom 0-byte files. ``--summary`` forces a
+    real PTP roundtrip, which fails fast when the camera isn't truly
+    captureable — gating recovery on it stops the unavailable-mode
+    recovery from looping straight back into another failed capture.
+    """
+    loop = asyncio.get_running_loop()
+    try:
+        cameras = await loop.run_in_executor(None, get_cameras)
+    except Exception as exc:
+        logger.debug("probe_camera_available: detection error %s", exc)
+        return False
+    if not any(model in c.get("model", "") for c in cameras):
+        return False
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                "gphoto2 --summary",
+                shell=True,
+                capture_output=True,
+                timeout=5,
+            ),
+        )
+    except Exception as exc:
+        logger.debug("probe_camera_available: summary error %s", exc)
+        return False
+    return result.returncode == 0
 
 
 def capture_and_download(download_dir: str, camera: str, port: str) -> str:
@@ -212,6 +267,40 @@ class Camera:
     def is_ready(self) -> bool:
         return self._ready
 
+    def refresh_address(self) -> bool:
+        """Re-detect the camera USB port and update ``self.addr``.
+
+        Power-cycling a USB camera re-enumerates the device and frequently
+        assigns a new bus/dev address (the ``usb:NNN,NNN`` token passed
+        to ``gphoto2 --port``). The Camera object captured the address at
+        ``__init__`` time, so after a recovery from unavailable mode the
+        next capture would target the dead port and gphoto2 returns
+        success with no file on disk (the phantom-file failure mode that
+        breaks Phase 5 recovery).
+
+        Returns True when a matching camera was re-detected; False
+        otherwise (the caller is already in a failure path and will
+        treat False as "still unavailable").
+        """
+        try:
+            detected = get_cameras()
+        except Exception as exc:
+            logger.warning("refresh_address: detection failed: %s", exc)
+            return False
+        for camera in detected:
+            if self.model in camera["model"]:
+                if camera["addr"] != self.addr:
+                    logger.info(
+                        "Camera USB address changed: %s -> %s",
+                        self.addr,
+                        camera["addr"],
+                    )
+                    self.addr = camera["addr"]
+                self.detected_cameras = detected
+                return True
+        logger.warning("refresh_address: model %s not in detected list", self.model)
+        return False
+
     def captures(self) -> list:
         return list(self._captures)
 
@@ -266,6 +355,17 @@ class Camera:
             elapsed,
             exif_dt,
         )
+
+        # Phantom-file guard: when the camera is unpowered mid-session,
+        # gphoto2 silently downloads a 0-byte (or size=-1) "frame" and
+        # returns success. Raising here lets Phase 5 unavailable mode
+        # take over instead of the strip composer choking downstream.
+        if size < MIN_VALID_CAPTURE_BYTES:
+            self._ready = True
+            raise CameraCaptureError(
+                f"Empty/short capture from {self.model}: path={pic} size={size} "
+                f"elapsed={elapsed:.2f}s exif_dt={exif_dt}"
+            )
 
         self._captures.append(pic)
         self._last_shot = pic
