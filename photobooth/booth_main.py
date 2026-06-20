@@ -1205,6 +1205,15 @@ class PhotoBooth:
             logger.error("Receipt print failed: %s", exc)
             component, scroll_text = self._classify_error(exc, hint="printer")
             await self._enter_unavailable(component, scroll_text)
+        # USB re-enumeration on power cycle invalidates the cached escpos
+        # Usb handle; the next print would re-raise Errno 19 even though
+        # the probe reports the printer as ready. Rebuild before retry.
+        reconnect = getattr(self.printer, "reconnect", None)
+        if reconnect is not None:
+            try:
+                reconnect()
+            except Exception as reconnect_exc:
+                logger.warning("Printer reconnect failed: %s", reconnect_exc)
         if post_recovery_url is not None:
             await self.display_url_with_context(post_recovery_url, **self._series_params())
         try:
@@ -1260,8 +1269,10 @@ class PhotoBooth:
             self.printer.text("Facebook: @capturingtimephotollc")
             self.printer.cut()
             logger.debug("Receipt print complete")
-        except Exception as exc:
-            logger.error("Receipt print failed: %s", exc)
+        except Exception:
+            # _print_with_recovery is the canonical logger for printer
+            # failures; logging here too produced duplicate "Receipt
+            # print failed" lines on every failure path.
             raise
 
 

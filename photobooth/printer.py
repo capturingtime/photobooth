@@ -112,10 +112,32 @@ class Printer:
 
         self.inputs = locals()
 
-        config = self.printer_spec["config"]
-        self.printer = Usb(**config)
+        self._config = self.printer_spec["config"]
+        self.printer = Usb(**self._config)
 
         # TODO: Add logic that verifies the printer is working
+
+    def reconnect(self) -> bool:
+        """Drop the cached escpos ``Usb`` instance and rebuild it.
+
+        Power-cycling a USB receipt printer re-enumerates the device and
+        invalidates the libusb handle stored inside the escpos ``Usb``
+        wrapper. Subsequent ``self.printer.text(...)`` calls then fail
+        with ``[Errno 19] No such device (it may have been disconnected)``
+        even though ``probe_printer_available`` (which does a fresh
+        ``usb.core.find``) reports the printer as ready. This mirrors the
+        camera-side ``Camera.refresh_address`` fix from earlier in Phase 9.
+
+        Returns True on success; False (and logs a warning) if the
+        rebuild raises so the caller can decide whether to surface the
+        failure or continue with the dead handle.
+        """
+        try:
+            self.printer = Usb(**self._config)
+        except Exception as exc:
+            logger.warning("Printer.reconnect: rebuild failed: %s", exc)
+            return False
+        return True
 
     def ln(self, count=1):
         """feeds n lines to print buffer
