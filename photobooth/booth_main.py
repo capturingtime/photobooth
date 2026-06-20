@@ -137,6 +137,10 @@ RESUME_STATE_PATH = os.environ.get("BOOTH_RESUME_STATE_PATH", "/var/lib/photoboo
 CAMERA_UNAVAILABLE_TEXT = "Camera not detected. Check power and USB.  "
 PRINTER_UNAVAILABLE_TEXT = "Printer not responding  "
 UNAVAILABLE_SCROLL_COLOR = (255, 0, 0)  # RED — inlined to avoid importing neopixel.RED
+# Minimum time to hold the unavailable screen even after the probe says
+# ready, so a fast recovery (e.g. USB re-enumeration completes within 1s
+# of the failed capture) doesn't flash by before the user can register it.
+UNAVAILABLE_MIN_HOLD_SECONDS = 2.5
 
 # --- Phase 6: offline upload queue ---
 UPLOAD_QUEUE_PATH = os.environ.get(
@@ -477,6 +481,12 @@ class PhotoBooth:
         long press during the dead window doesn't fire on recovery.
         """
         logger.warning("Entering unavailable mode: component=%s", component)
+        loop = asyncio.get_running_loop()
+        entered_at = loop.time()
+        # Drain queued button events from the failure window so a
+        # held/double-bounced press from the moment of failure doesn't
+        # auto-skip the recovery the moment we return.
+        await self._flush_events()
         await self.display_url_with_context(UNAVAILABLE_URL)
         scroll_task = asyncio.create_task(
             self.panel.scroll(
@@ -488,6 +498,12 @@ class PhotoBooth:
         )
         try:
             await self.health.wait_until_ready(component, timeout=None)
+            # Hold the screen for a minimum visible window even when the
+            # probe came back ready almost immediately (USB re-enumeration
+            # of a power-cycled camera often completes in <1s).
+            remaining = UNAVAILABLE_MIN_HOLD_SECONDS - (loop.time() - entered_at)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
         finally:
             scroll_task.cancel()
             try:
@@ -497,6 +513,8 @@ class PhotoBooth:
             except Exception as exc:
                 logger.debug("Unavailable scroll exit error: %s", exc)
             self.panel.clear()
+        # Drain again — any button events queued during the wait shouldn't
+        # consume the post-recovery state's first input either.
         await self._flush_events()
         logger.info("Exiting unavailable mode: component=%s ready", component)
 
