@@ -296,7 +296,11 @@ class PhotoBooth:
 
                 if decision in (KEEP_BUTTON, "capture") and qr_url is not None:
                     logger.info("Printing receipt for %s", image_path)
-                    await self._print_with_recovery(qr_url, pending_notice=pending_notice)
+                    await self._print_with_recovery(
+                        qr_url,
+                        pending_notice=pending_notice,
+                        post_recovery_url=final_url,
+                    )
                     self._print_counts[image_path] = 1
                     last_print_time = loop.time()
 
@@ -356,13 +360,19 @@ class PhotoBooth:
                 attract.cancel()
                 url = self.uploader.public_url(last_key)
                 await self.panel.scroll(text="Printing...  ", speed=0.005, count=1)
-                await self._print_with_recovery(url)
+                await self._print_with_recovery(url, post_recovery_url=ATTRACT_URL)
                 self._print_counts[last_shot] = count + 1
                 # Set the rate-limit anchor AFTER the print finishes; otherwise
                 # presses queued during the (5+ second) print pop afterwards and
                 # already exceed the 3 s cooldown measured from print start.
                 last_print_time = loop.time()
                 await self._flush_events()
+                # Reprint path: ensure kiosk is back on attract regardless of
+                # whether _print_with_recovery dipped through unavailable mode
+                # (which leaves the kiosk on unavailable.png until something
+                # navigates it away). Capture path already calls display_url
+                # after the print resolves; the reprint path didn't.
+                await self.display_url_with_context(ATTRACT_URL, **self._series_params())
                 attract = asyncio.create_task(
                     self.panel.scroll(
                         text="Press the big blue button to begin!  ",
@@ -894,7 +904,7 @@ class PhotoBooth:
             if shots:
                 await self.panel.scroll(
                     text=f"Shot {len(shots) + 1} of {total}! Get ready!  ",
-                    speed=0.005,
+                    speed=0.001,
                     count=1,
                 )
             image_path = await self._take_one_shot(
@@ -1161,7 +1171,12 @@ class PhotoBooth:
     # Receipt printer
     # ------------------------------------------------------------------
 
-    async def _print_with_recovery(self, url: str, pending_notice: Optional[str] = None) -> None:
+    async def _print_with_recovery(
+        self,
+        url: str,
+        pending_notice: Optional[str] = None,
+        post_recovery_url: Optional[str] = None,
+    ) -> None:
         """Run ``_do_print`` in the thread executor; on failure, enter
         unavailable mode and retry once after the printer recovers.
 
@@ -1172,6 +1187,15 @@ class PhotoBooth:
         ``pending_notice`` (Phase 6) is an optional short string printed
         under the QR when the upload was deferred to the queue — lets the
         user know their QR will work once the booth reconnects.
+
+        ``post_recovery_url`` is the screen to navigate to after exiting
+        unavailable mode and before the retry print fires. The
+        unavailable-mode handler leaves the kiosk parked on
+        ``unavailable.png``; callers should pass the screen the user was
+        on at the moment of failure (final composite for fresh prints,
+        attract for reprints) so the post-recovery retry doesn't run
+        with the wrong URL on screen, and so the LED panel and kiosk
+        stay in sync once the function returns.
         """
         loop = asyncio.get_running_loop()
         try:
@@ -1181,6 +1205,8 @@ class PhotoBooth:
             logger.error("Receipt print failed: %s", exc)
             component, scroll_text = self._classify_error(exc, hint="printer")
             await self._enter_unavailable(component, scroll_text)
+        if post_recovery_url is not None:
+            await self.display_url_with_context(post_recovery_url, **self._series_params())
         try:
             await loop.run_in_executor(None, self._do_print, url, pending_notice)
         except Exception as exc:
