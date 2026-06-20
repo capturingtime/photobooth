@@ -19,6 +19,20 @@ logger = logging.getLogger(__name__)
 
 DEFAULT_CAPTURE_DIR = "/opt/captures"
 
+# Below this byte count, a downloaded "capture" is almost certainly a stale
+# buffer frame or empty wakeup artifact (a real Canon JPEG is >1 MB). The
+# Phase 5 unavailable-mode path keys off the exception this triggers.
+MIN_VALID_CAPTURE_BYTES = 100_000
+
+
+class CameraCaptureError(RuntimeError):
+    """Raised when gphoto2 returns without a valid image on disk.
+
+    Bridges Phase 5: ``_take_one_shot`` catches this, ``_classify_error``
+    maps it to ``("camera", CAMERA_UNAVAILABLE_TEXT)``, and the booth
+    enters unavailable mode + waits for HealthMonitor recovery.
+    """
+
 
 def run_local_cmd(cmd: str):
     """Run a shell command synchronously. Used during init/config only."""
@@ -282,6 +296,17 @@ class Camera:
             elapsed,
             exif_dt,
         )
+
+        # Phantom-file guard: when the camera is unpowered mid-session,
+        # gphoto2 silently downloads a 0-byte (or size=-1) "frame" and
+        # returns success. Raising here lets Phase 5 unavailable mode
+        # take over instead of the strip composer choking downstream.
+        if size < MIN_VALID_CAPTURE_BYTES:
+            self._ready = True
+            raise CameraCaptureError(
+                f"Empty/short capture from {self.model}: path={pic} size={size} "
+                f"elapsed={elapsed:.2f}s exif_dt={exif_dt}"
+            )
 
         self._captures.append(pic)
         self._last_shot = pic

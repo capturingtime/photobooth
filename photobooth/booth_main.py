@@ -577,6 +577,22 @@ class PhotoBooth:
         self._last_uploaded_path = image_path
         self._last_uploaded_key = key
 
+        # Short-circuit when HealthMonitor already knows the network is
+        # down. boto3's blocking executor call can wedge well past the
+        # asyncio.wait_for timeout when DNS itself is unreachable, which
+        # was causing the post-capture flow (receipt print + green-button
+        # consumption) to stall indefinitely on a fully-offline booth.
+        # The queue worker re-attempts once net_www flips back to ready.
+        health = getattr(self, "health", None)
+        net_ready = True if health is None else health.is_ready("net_www")
+        if not net_ready:
+            logger.info(
+                "Network offline (net_www unavailable) — enqueueing key=%s without upload attempt",
+                key,
+            )
+            self._upload_queue.enqueue(key, image_path)
+            return (qr_url, PENDING_UPLOAD_NOTICE)
+
         logger.info("Uploading: file=%s bucket=%s", image_path, S3_BUCKET)
         scroll_task = asyncio.create_task(
             self.panel.scroll(
@@ -601,12 +617,24 @@ class PhotoBooth:
                 )
                 self._upload_queue.enqueue(key, image_path)
                 pending_notice = PENDING_UPLOAD_NOTICE
+                # Force a recheck so the queue worker waits for recovery
+                # instead of pounding on a known-bad link.
+                if health is not None:
+                    try:
+                        await health._probe_once("net_www")
+                    except Exception as probe_exc:
+                        logger.debug("net_www probe after upload timeout: %s", probe_exc)
             except Exception as exc:
                 # boto3 client/connection errors land here; any of them
                 # signal "S3 isn't usable right now" — queue and move on.
                 logger.warning("Upload failed (%s) — enqueueing key=%s", exc, key)
                 self._upload_queue.enqueue(key, image_path)
                 pending_notice = PENDING_UPLOAD_NOTICE
+                if health is not None:
+                    try:
+                        await health._probe_once("net_www")
+                    except Exception as probe_exc:
+                        logger.debug("net_www probe after upload error: %s", probe_exc)
         finally:
             scroll_task.cancel()
             try:
