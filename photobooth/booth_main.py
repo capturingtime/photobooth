@@ -275,16 +275,18 @@ class PhotoBooth:
                 final_url = SERIES_FINAL_URL if is_series else SINGLE_FINAL_URL
                 logger.info("Capture completed: mode=%s file=%s", mode, image_path)
 
-                # Phase 6: sequential upload-with-timeout. "Uploading..." scrolls
-                # on the panel while we wait up to UPLOAD_TIMEOUT_SECONDS. On
-                # timeout/error the capture is queued for later and the receipt
-                # still prints with a valid QR code (public_url is deterministic
-                # on the key, so the URL works once the queue drains).
-                qr_url, pending_notice = await self._upload_or_enqueue(image_path)
-
-                # Navigate to the final screen after upload resolves so the
-                # user does not see the screen flicker mid-upload.
+                # Show the composite first so the user sees their photo with
+                # zero perceived delay; the upload runs in parallel. ``public_url``
+                # is deterministic on the key (computed inside _upload_or_enqueue)
+                # so the QR code prints correctly even if the upload is still
+                # in flight or eventually gets queued for retry.
                 await self.display_url_with_context(final_url, **self._series_params())
+
+                # Phase 6: upload-with-timeout in the background. "Uploading..."
+                # scrolls on the LED panel while this runs; the user can decide
+                # to print at any time and we'll await this task below before
+                # firing the print so pending_notice reflects the final state.
+                upload_task = asyncio.create_task(self._upload_or_enqueue(image_path))
 
                 # Hold final screen up to 60 s; green = print receipt, anything else = attract
                 await self._flush_events()
@@ -293,6 +295,16 @@ class PhotoBooth:
                 except asyncio.TimeoutError:
                     logger.debug("Final-screen timeout — returning to attract")
                     decision = None
+
+                # Resolve the upload before printing. In practice the user takes
+                # at least a few seconds to react, so the task is almost always
+                # already done; worst case we wait UPLOAD_TIMEOUT_SECONDS for the
+                # timeout + queue path to settle.
+                try:
+                    qr_url, pending_notice = await upload_task
+                except Exception as exc:
+                    logger.warning("Background upload task raised: %s", exc)
+                    qr_url, pending_notice = (None, None)
 
                 if decision in (KEEP_BUTTON, "capture") and qr_url is not None:
                     logger.info("Printing receipt for %s", image_path)
