@@ -303,7 +303,7 @@ capture flow:
 6. On `asyncio.TimeoutError` or any other `boto3` exception:
    `UploadQueue.enqueue(key, image_path)` is called; the receipt
    `pending_notice` is set to `PENDING_UPLOAD_NOTICE`
-   (`"* Photo upload pending — your QR will work once the booth
+   (`"* Photo upload pending - your QR will work once the booth
    reconnects to the internet."`) which `_do_print` renders under the
    QR code.
 

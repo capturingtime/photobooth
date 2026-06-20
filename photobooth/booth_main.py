@@ -102,9 +102,7 @@ HEALTH_RECHECK_INTERVAL = 10.0  # Background re-probe cadence for unavailable.
 # BOOTH_ACTIVE_TEMPLATE: unset/empty = plain single-shot
 #                        folder with shot_count=1 = single shot + final overlay
 #                        folder with shot_count>1 = series / strip mode
-TEMPLATE_BASE_DIR = os.environ.get(
-    "BOOTH_TEMPLATE_BASE_DIR", "/opt/photobooth/templates"
-)
+TEMPLATE_BASE_DIR = os.environ.get("BOOTH_TEMPLATE_BASE_DIR", "/opt/photobooth/templates")
 ACTIVE_TEMPLATE = os.environ.get("BOOTH_ACTIVE_TEMPLATE", "strip_test_template") or None
 
 # --- Button roles (GPIO event labels — context-dependent) ---
@@ -147,8 +145,7 @@ UPLOAD_QUEUE_PATH = os.environ.get(
 UPLOAD_TIMEOUT_SECONDS = 5.0
 UPLOADING_SCROLL_TEXT = "Uploading...  "
 PENDING_UPLOAD_NOTICE = (
-    "* Photo upload pending — your QR will work once the booth"
-    " reconnects to the internet."
+    "* Photo upload pending - your QR will work \n" "once the booth reconnects to the internet."
 )
 # Worker backoff: start fast (5s) so a transient flap drains promptly;
 # double after each failure; cap at 5 min so a long outage doesn't
@@ -173,14 +170,11 @@ class PhotoBooth:
                 self.uploader = Uploader(bucket_name=S3_BUCKET)
                 logger.info("Uploader ready: bucket=%s", S3_BUCKET)
             except Exception as exc:
-                logger.warning(
-                    "Uploader unavailable: %s (uploads/prints disabled)", exc
-                )
+                logger.warning("Uploader unavailable: %s (uploads/prints disabled)", exc)
                 self.uploader = None
         else:
             logger.warning(
-                "Uploader not available (boto3/utilities missing) — "
-                "uploads/prints disabled"
+                "Uploader not available (boto3/utilities missing) — " "uploads/prints disabled"
             )
             self.uploader = None
 
@@ -226,9 +220,7 @@ class PhotoBooth:
             attract_text = "Press the big blue button to begin!  "
         else:
             attract_text = "Press the big blue button to continue!  "
-        attract = asyncio.create_task(
-            self.panel.scroll(text=attract_text, speed=0.005, count=999)
-        )
+        attract = asyncio.create_task(self.panel.scroll(text=attract_text, speed=0.005, count=999))
         last_print_time: float = 0.0
 
         while True:
@@ -345,9 +337,7 @@ class PhotoBooth:
                     )
                     attract.cancel()
                     await self._flush_events()
-                    await self.panel.scroll(
-                        text="Max prints reached, sorry!  ", count=1
-                    )
+                    await self.panel.scroll(text="Max prints reached, sorry!  ", count=1)
                     await self.display_url_with_context(ATTRACT_URL, **self._series_params())
                     attract = asyncio.create_task(
                         self.panel.scroll(
@@ -860,9 +850,7 @@ class PhotoBooth:
 
         if self.strip is not None and self.strip.shot_count == 1:
             loop = asyncio.get_running_loop()
-            final_path = (
-                f"{BOOTH_DIR}/final_{datetime.now().strftime('%Y%m%d-%Hh%Mm%Ss')}.jpg"
-            )
+            final_path = f"{BOOTH_DIR}/final_{datetime.now().strftime('%Y%m%d-%Hh%Mm%Ss')}.jpg"
             image_path = await loop.run_in_executor(
                 None, self.strip.compose, [image_path], final_path
             )
@@ -921,9 +909,7 @@ class PhotoBooth:
             )
 
             if decision == "redo":
-                series_decision = await self._series_capture_review(
-                    shots, last_decided=image_path
-                )
+                series_decision = await self._series_capture_review(shots, last_decided=image_path)
                 if series_decision == "start_over":
                     logger.info("Series cancelled by user (start over)")
                     return None
@@ -935,16 +921,12 @@ class PhotoBooth:
                 continue
 
             # decision == "keep" — go to between-shots review page
-            series_decision = await self._series_capture_review(
-                shots, last_decided=image_path
-            )
+            series_decision = await self._series_capture_review(shots, last_decided=image_path)
             if series_decision == "start_over":
                 logger.info("Series cancelled by user (start over)")
                 return None
 
-        strip_path = (
-            f"{BOOTH_DIR}/strip_{datetime.now().strftime('%Y%m%d-%Hh%Mm%Ss')}.jpg"
-        )
+        strip_path = f"{BOOTH_DIR}/strip_{datetime.now().strftime('%Y%m%d-%Hh%Mm%Ss')}.jpg"
         result = await loop.run_in_executor(None, self.strip.compose, shots, strip_path)
         logger.info("Strip composed: file=%s shots=%d", strip_path, total)
         return result
@@ -1006,16 +988,12 @@ class PhotoBooth:
         except OSError:
             pass
         self._phrase_task = asyncio.create_task(
-            self.panel.scroll(
-                text=random.choice(CAPTURE_PHRASES), speed=0.001, count=1
-            )
+            self.panel.scroll(text=random.choice(CAPTURE_PHRASES), speed=0.001, count=1)
         )
         return image_path
 
     @staticmethod
-    def _compress_image(
-        image_path: str, max_dimension: int = 2048, quality: int = 85
-    ) -> None:
+    def _compress_image(image_path: str, max_dimension: int = 2048, quality: int = 85) -> None:
         """Resize to max_dimension on the longest side and recompress in-place."""
         from PIL import Image
 
@@ -1140,18 +1118,12 @@ class PhotoBooth:
                             continue
                         scroll.cancel()
                         self.panel.clear()
-                        decision = await self._review_shot(
-                            last_decided, series_mode=False
-                        )
+                        decision = await self._review_shot(last_decided, series_mode=False)
                         if decision == "keep" and last_decided not in shots:
-                            logger.info(
-                                "Series undo redo: keeping %s", last_decided
-                            )
+                            logger.info("Series undo redo: keeping %s", last_decided)
                             shots.append(last_decided)
                         elif decision == "redo" and last_decided in shots:
-                            logger.info(
-                                "Series undo keep: redoing %s", last_decided
-                            )
+                            logger.info("Series undo keep: redoing %s", last_decided)
                             shots.remove(last_decided)
                         break  # re-show series_capture page + reset scroll
             finally:

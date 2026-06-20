@@ -98,11 +98,21 @@ def get_cameras() -> list:
 
 
 async def probe_camera_available(model: str) -> bool:
-    """Return True if gphoto2 detects a camera whose name contains ``model``.
+    """Return True if gphoto2 sees ``model`` AND the camera answers a PTP query.
 
     Used by ``HealthMonitor`` (v0.5.0 Phase 4) to decide whether the
-    booth can proceed past startup. Never raises — any error during
-    detection is treated as "not present" and the caller will retry.
+    booth can proceed past startup *or* resume capture after a failure.
+    Never raises — any error during detection is treated as "not
+    present" and the caller will retry.
+
+    USB enumeration (``--auto-detect``) is necessary but not sufficient:
+    the Canon T7i appears on the USB bus for several seconds after
+    power-on before its PTP layer is ready to capture, and a failed
+    camera mid-session can leave gphoto2 reporting "detected" while
+    actual captures return phantom 0-byte files. ``--summary`` forces a
+    real PTP roundtrip, which fails fast when the camera isn't truly
+    captureable — gating recovery on it stops the unavailable-mode
+    recovery from looping straight back into another failed capture.
     """
     loop = asyncio.get_running_loop()
     try:
@@ -110,7 +120,22 @@ async def probe_camera_available(model: str) -> bool:
     except Exception as exc:
         logger.debug("probe_camera_available: detection error %s", exc)
         return False
-    return any(model in c.get("model", "") for c in cameras)
+    if not any(model in c.get("model", "") for c in cameras):
+        return False
+    try:
+        result = await loop.run_in_executor(
+            None,
+            lambda: subprocess.run(
+                "gphoto2 --summary",
+                shell=True,
+                capture_output=True,
+                timeout=5,
+            ),
+        )
+    except Exception as exc:
+        logger.debug("probe_camera_available: summary error %s", exc)
+        return False
+    return result.returncode == 0
 
 
 def capture_and_download(download_dir: str, camera: str, port: str) -> str:
