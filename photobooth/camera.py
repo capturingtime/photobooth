@@ -267,6 +267,40 @@ class Camera:
     def is_ready(self) -> bool:
         return self._ready
 
+    def refresh_address(self) -> bool:
+        """Re-detect the camera USB port and update ``self.addr``.
+
+        Power-cycling a USB camera re-enumerates the device and frequently
+        assigns a new bus/dev address (the ``usb:NNN,NNN`` token passed
+        to ``gphoto2 --port``). The Camera object captured the address at
+        ``__init__`` time, so after a recovery from unavailable mode the
+        next capture would target the dead port and gphoto2 returns
+        success with no file on disk (the phantom-file failure mode that
+        breaks Phase 5 recovery).
+
+        Returns True when a matching camera was re-detected; False
+        otherwise (the caller is already in a failure path and will
+        treat False as "still unavailable").
+        """
+        try:
+            detected = get_cameras()
+        except Exception as exc:
+            logger.warning("refresh_address: detection failed: %s", exc)
+            return False
+        for camera in detected:
+            if self.model in camera["model"]:
+                if camera["addr"] != self.addr:
+                    logger.info(
+                        "Camera USB address changed: %s -> %s",
+                        self.addr,
+                        camera["addr"],
+                    )
+                    self.addr = camera["addr"]
+                self.detected_cameras = detected
+                return True
+        logger.warning("refresh_address: model %s not in detected list", self.model)
+        return False
+
     def captures(self) -> list:
         return list(self._captures)
 

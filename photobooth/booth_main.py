@@ -975,6 +975,16 @@ class PhotoBooth:
             logger.error("Camera capture failed: %s", exc)
             component, scroll_text = self._classify_error(exc, hint="camera")
             await self._enter_unavailable(component, scroll_text)
+            # USB re-enumeration on power cycle reassigns the gphoto2
+            # ``--port`` address; the stored value goes stale and the
+            # next capture would silently return a phantom file again.
+            # Refresh so the next retry targets the live device.
+            refresh = getattr(self.camera, "refresh_address", None)
+            if refresh is not None:
+                try:
+                    refresh()
+                except Exception as refresh_exc:
+                    logger.warning("Camera address refresh failed: %s", refresh_exc)
             return None
         if twinkle_task is not None:
             twinkle_task.cancel()
