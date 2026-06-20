@@ -183,6 +183,15 @@ Each probe is wrapped in try/except inside `HealthMonitor._probe_once`,
 so a probe that raises is treated as `False` and the exception repr is
 stored on `ComponentHealth.last_error`.
 
+`probe_camera_available` is layered for correctness: it first runs
+`gphoto2 --auto-detect` to confirm the model is on the USB bus, then
+issues `gphoto2 --summary` (5 s subprocess timeout) to force a real PTP
+roundtrip. The double-check is load-bearing — a Canon T7i in a half-
+failed state stays USB-enumerated after power loss but cannot capture,
+and a freshly powered-on body needs a few seconds before PTP responds.
+Without the summary check the recheck loop would flip `camera` back to
+`ready` while captures still returned phantom 0-byte files.
+
 ### Startup wait
 
 `_startup()` calls `register(name, probe)` then
@@ -221,19 +230,51 @@ consumers can react to recovery events without polling.
 A runtime failure of a required hardware component routes through
 `PhotoBooth._enter_unavailable(component, scroll_text)`:
 
-1. The kiosk navigates to `UNAVAILABLE_URL`
+1. Queued GPIO events from the failure transient are drained so a
+   held / double-bounced press doesn't auto-skip the recovery before
+   the user can see it.
+2. The kiosk navigates to `UNAVAILABLE_URL`
    (`/main/unavailable/` → `unavailable.html` → `unavailable.png`).
-2. A continuous red scroll on the neopixel announces the diagnosis
+3. A continuous red scroll on the neopixel announces the diagnosis
    (`"Camera not detected. Check power and USB."` for camera,
    `"Printer not responding"` for printer).
-3. The flow awaits `HealthMonitor.wait_until_ready(component, timeout=None)`.
-4. On recovery, the scroll task is cancelled, the panel cleared, queued
-   button events are drained, and control returns to the caller — which
+4. The flow awaits `HealthMonitor.wait_until_ready(component, timeout=None)`.
+5. On probe-success, the screen + scroll hold for
+   `UNAVAILABLE_MIN_HOLD_SECONDS = 2.5 s` measured from step 1 — without
+   the pad, a power-cycled camera that re-enumerates in <1 s would flash
+   the unavailable screen by before the user could register it.
+6. Scroll task cancelled, panel cleared, queued events drained again
+   (so presses during the hold don't consume the first input of the
+   recovered state), and control returns to the caller — which
    re-issues the failed operation.
+
+**Stale USB handle recovery.** Power-cycling a USB device re-enumerates
+it and assigns a new bus/dev address; the cached handles in `Camera`
+(`self.addr`) and `Printer` (the escpos `Usb` wrapper) become dead
+even though the corresponding probes report ready. The recovery
+callers refresh them before retrying:
+
+- `_take_one_shot` calls `Camera.refresh_address()` after
+  `_enter_unavailable` returns — re-runs `get_cameras()` and updates
+  `self.addr` so the next `gphoto2 --port` targets the live device.
+- `_print_with_recovery` calls `Printer.reconnect()` (rebuilds
+  `self.printer = Usb(**self._config)`) before its retry print.
+
+Both methods are no-ops on the fast path (when no power cycle has
+happened) and degrade gracefully (log + return `False`) when the
+refresh itself raises.
 
 **Internet / S3 failures never enter unavailable mode** — they are
 handled entirely by the offline-upload path so the booth stays fully
 operable for capture + receipt printing during connectivity outages.
+
+`_print_with_recovery(url, pending_notice, post_recovery_url)` takes a
+`post_recovery_url` so the kiosk lands on the right screen after
+`_enter_unavailable` exits and before the retry print fires — the
+unavailable-mode handler leaves the browser parked on `unavailable.png`,
+so callers pass the screen the user was on at the moment of failure
+(capture path: `final_url`; reprint path: `ATTRACT_URL`) to keep the
+kiosk and LED panel in sync.
 
 #### Resume state file
 
@@ -291,21 +332,46 @@ at print time.
 
 ### Capture-time path
 
-`PhotoBooth._upload_or_enqueue(image_path)` runs sequentially in the
-capture flow:
+The capture flow shows the composite immediately and runs
+`_upload_or_enqueue` as a background task while the user views their
+photo:
+
+```python
+await self.display_url_with_context(final_url, ...)          # composite shows now
+upload_task = asyncio.create_task(self._upload_or_enqueue(image_path))
+decision = await asyncio.wait_for(self.rpi.next_event(), timeout=60)
+qr_url, pending_notice = await upload_task                   # almost always already done
+```
+
+By the time the user reacts (a few seconds of look-time), the upload
+task has typically completed; the `await upload_task` before the print
+branch costs nothing in the common case and at most `UPLOAD_TIMEOUT_SECONDS`
+in the worst case. The QR target is deterministic (`public_url(make_key(...))`
+is computed inside `_upload_or_enqueue` before any S3 traffic), so the
+receipt is always correct.
+
+`PhotoBooth._upload_or_enqueue(image_path)` itself:
 
 1. `make_key(image_path)` builds the deterministic S3 key.
 2. `public_url(key)` is stashed up front and used as the receipt QR
    target regardless of whether the upload completes.
-3. A continuous "Uploading..." scroll starts on the neopixel.
-4. `Uploader.upload_with_timeout(path, key, timeout_s=5.0)` runs.
-5. On success: scroll cancelled, control returns with `(qr_url, None)`.
-6. On `asyncio.TimeoutError` or any other `boto3` exception:
+3. **Short-circuit:** if `HealthMonitor.is_ready("net_www")` is False,
+   skip the upload attempt entirely, enqueue immediately, and return
+   `(qr_url, PENDING_UPLOAD_NOTICE)`. Necessary because boto3's
+   blocking executor call can wedge past `asyncio.wait_for` when DNS
+   itself is unreachable, which previously stranded the booth on the
+   final screen with no receipt and no consumed input events.
+4. A continuous "Uploading..." scroll starts on the neopixel.
+5. `Uploader.upload_with_timeout(path, key, timeout_s=5.0)` runs.
+6. On success: scroll cancelled, control returns with `(qr_url, None)`.
+7. On `asyncio.TimeoutError` or any other `boto3` exception:
    `UploadQueue.enqueue(key, image_path)` is called; the receipt
    `pending_notice` is set to `PENDING_UPLOAD_NOTICE`
    (`"* Photo upload pending - your QR will work once the booth
    reconnects to the internet."`) which `_do_print` renders under the
-   QR code.
+   QR code. The same path also force-probes `net_www` so the recheck
+   loop owns the recovery flip (instead of the queue worker hammering
+   a known-bad link).
 
 The receipt prints either way; the booth never blocks the user for more
 than 5 s on a slow link.

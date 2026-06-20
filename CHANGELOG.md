@@ -4,7 +4,7 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
-## [v0.5.0] — 2026-06-16
+## [v0.5.0] — 2026-06-20
 
 User-experience and reliability release. Trims countdown to a flat 2 s,
 parallelises the post-capture review screen with the LED reaction phrase,
@@ -195,6 +195,81 @@ directory created by provisioning.
   prints with a working QR (the S3 key is deterministic client-side, so
   the queued upload eventually lands at the URL the QR already encoded)
   and a "* Photo upload pending" notice under the QR explains why.
+
+### Phase 9 deployment hotfixes (during live smoke testing on the booth Pi)
+
+- **`Neopixel.scroll_for_duration` paces by absolute per-frame deadlines.**
+  The original "speed = duration_s / frames" formula ignored the
+  per-frame cost of `np.show()` (≈10-15 ms on the live Pi NeoPixel) so
+  every label scrolled ~2.5× the requested duration and the live
+  countdown landed near 5 s instead of 2 s. The deadline pacing keeps
+  the total pass at ≈ `duration_s` when rendering can keep up and
+  gracefully degrades to "as fast as the hardware allows" when it can't;
+  no extra sleep is added on late frames.
+- **`Camera.capture_async` raises `CameraCaptureError` on phantom-file
+  capture.** When the camera is power-cycled mid-session, gphoto2
+  silently returns success with a 0-byte (or `size=-1`) "frame" instead
+  of raising. The runtime then propagated an obscure downstream error
+  from the strip composer. The capture path now verifies the downloaded
+  file size against `MIN_VALID_CAPTURE_BYTES` (100 KB — well under a
+  real Canon JPEG at 3-4 MB) and raises so Phase 5's catch-and-recover
+  flow takes over.
+- **`probe_camera_available` requires a PTP roundtrip.** USB enumeration
+  alone (`gphoto2 --auto-detect`) said "ready" while the camera was
+  still waking up after power-on or stuck in a half-failed state — a
+  capture in that window returns the phantom file above. The probe now
+  also runs `gphoto2 --summary` (5 s subprocess timeout) and requires a
+  zero exit so recovery from unavailable mode only progresses when the
+  camera is actually captureable, not just enumerated.
+- **`Camera.refresh_address()` runs after camera recovery.** USB
+  re-enumeration on a power cycle reassigns the bus/dev address; the
+  `Camera` instance had captured the old `usb:NNN,NNN` token at
+  `__init__` and kept passing it to `gphoto2 --port`, which returned
+  success against the dead port. `_take_one_shot`'s except branch now
+  re-detects and updates `self.addr` after `_enter_unavailable` returns,
+  so the next capture targets the live device.
+- **`Printer.reconnect()` runs after printer recovery.** Same pattern as
+  the camera fix: power-cycling the receipt printer invalidates the
+  cached escpos `Usb` libusb handle even though `probe_printer_available`
+  reports the device as ready, and every print after recovery re-raised
+  `[Errno 19] No such device`. The method rebuilds `self.printer = Usb(**self._config)`;
+  `_print_with_recovery` calls it after `_enter_unavailable` returns and
+  before the retry print.
+- **`_print_with_recovery(post_recovery_url=...)` keeps kiosk + LED in
+  sync after printer recovery.** Without it, the reprint path landed
+  the kiosk on `unavailable.png` while the LED was back to the attract
+  scroll. The capture path passes `final_url` so the user sees the
+  composite again during the retry print (visual confirmation of the
+  recovery); the reprint path passes `ATTRACT_URL` so both surfaces
+  agree on attract.
+- **Unavailable mode holds for `UNAVAILABLE_MIN_HOLD_SECONDS = 2.5`
+  even on a fast probe-success.** When a power-cycled camera completed
+  USB re-enumeration in <1 s of the failed capture, the unavailable
+  screen flashed by before the user could register it; the
+  recheck-and-recover loop also auto-skipped on queued bouncing
+  button presses. `_enter_unavailable` now `_flush_events()` on
+  *both* sides of the wait (before navigating to `unavailable.png` and
+  after the min-hold) and pads short recoveries to the visible window.
+- **`_upload_or_enqueue` short-circuits when HealthMonitor reports
+  `net_www` unavailable.** boto3's blocking executor call can wedge past
+  the `asyncio.wait_for` timeout when DNS itself is unreachable, which
+  stalled the post-capture flow indefinitely on a fully-offline booth
+  (receipt never printed, green-button events queued but never consumed).
+  The capture path now skips the upload attempt entirely when the
+  monitor says net_www is down, enqueues immediately, and returns the
+  `PENDING_UPLOAD_NOTICE` so the receipt prints. The queue worker
+  drains on the next `net_www` recovery transition.
+- **Capture flow shows the composite immediately and uploads in
+  parallel.** Previously the final screen waited for the synchronous
+  `_upload_or_enqueue` (~1-5 s on success, full timeout on a slow link)
+  before the user saw their photo. The composite now navigates first;
+  the upload runs as a background `asyncio.Task` while the user views
+  the photo, and `await upload_task` resolves the QR target /
+  `pending_notice` only when the print branch needs them. The QR
+  remains correct because `public_url(make_key(...))` is deterministic.
+- **Duplicate "Receipt print failed" log line removed.** `_do_print`
+  was both logging the failure and re-raising; `_print_with_recovery`
+  also logged it. `_print_with_recovery` is now the canonical logger.
 
 ### Upgrade
 

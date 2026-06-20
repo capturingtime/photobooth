@@ -8,11 +8,16 @@ workstream.
 
 ## What's new in v0.5.0
 
-- **Faster countdown.** Blue button → shutter is now a flat ~2.0 s
-  (`3.../2.../1...` at 0.4 s each + `Smile!` overlapping the capture).
+- **Faster countdown.** Blue button → shutter is ~3 s on the live booth
+  hardware (`3.../2.../1...` scrolls at deadline-paced ≈0.4 s each +
+  `Smile!` overlapping the gphoto2 capture).
 - **Photo on screen sooner.** The kiosk navigates to the review screen
   in parallel with the LED reaction phrase, so the photo appears almost
   immediately after the shutter.
+- **Composite shows immediately, uploads in the background.** The
+  series-final / single-final screen no longer waits on S3 — the user
+  sees their photo as soon as the strip is composed, and the upload
+  runs as a background task while they decide whether to print.
 - **Larger review-screen aperture.** Photos render into the redrawn
   1215×810 aperture in `last_capture.png` / `single_final.png` with no
   letterboxing.

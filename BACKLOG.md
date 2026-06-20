@@ -5,6 +5,60 @@ entry to a workstream when it's time to build; remove when shipped.
 
 ---
 
+## Proactive component health watchdog (v0.5.1 candidate)
+
+Phase 5's `_enter_unavailable` is purely reactive: the booth only notices
+a hardware failure when the next operation against that hardware is
+attempted. On the live booth this is most visible with the camera —
+power it off mid-series, between shots, and nothing happens until the
+user presses blue, at which point the countdown plays, the capture
+fails, and only then does the unavailable screen appear.
+
+### Why pick it up
+
+The current behavior is technically safe (no data loss) and the design
+intent ("wrap each hardware op in try/except") is sound, but the user
+expectation is "if the camera vanishes, tell me right away." The gap is
+most painful at events where the operator isn't standing at the booth
+to notice a tripped USB cable until a guest is mid-press.
+
+### Sketch
+
+Two related changes:
+
+1. **`HealthMonitor.recheck_loop` probes ready components too**, not
+   just ones already in `unavailable`. The probe is cheap (camera is
+   ~0.5 s of `gphoto2 --summary`, printer is a USB enumerate, net is
+   the existing 1 s connection check). A `ready → unavailable`
+   transition publishes a `StateChange` to `state_changes` exactly the
+   way the existing path does.
+2. **`booth_main` subscribes to `state_changes`** in a background task
+   and, when a required component transitions to `unavailable`,
+   interrupts the current main-loop state and routes through
+   `_enter_unavailable`. The interrupt mechanism is the hard part —
+   `asyncio.CancelledError` against whatever the main loop is awaiting
+   (a button event, a screen-hold timeout, an in-flight upload task)
+   plus a state-restoration path on recovery so the booth returns to
+   the right screen.
+
+### Open design questions
+
+- **Probe cadence** for the camera. `--summary` against an idle camera
+  is fine at 10 s intervals; cranking it lower might interfere with
+  actual captures (gphoto2 holds an exclusive USB lock).
+- **Which states are interruptable.** Attract, review, and series-
+  capture are clearly safe. Mid-print is not — interrupting an ESC/POS
+  receipt mid-flight would leave torn paper. Probably gate the
+  interrupt on `_print_with_recovery` not being on the stack.
+- **Test surface.** The reactive path is well-covered by
+  `test_unavailable_mode.py` / `test_resume_mid_series.py`; the
+  proactive path needs at least: probe-flip-during-attract, probe-flip-
+  during-final-screen, probe-flip-during-active-capture (should be
+  swallowed because capture itself will surface it), probe-flip-during-
+  print (should be blocked / queued until print completes).
+
+---
+
 ## Smoke test for booth auto-QA
 
 After every code change to the photobooth runtime, a smoke test should be
