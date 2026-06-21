@@ -28,8 +28,8 @@ COLOR_LIST = ["RED", "GREEN", "BLUE", "YELLOW", "PURPLE", "CYAN", "ORANGE", "PIN
 COLOR_TUPLE_LIST = [RED, GREEN, BLUE, YELLOW, PURPLE, CYAN, ORANGE, PINK, WHITE]
 
 DEFAULT_BRIGHTNESS = 0.1
-DEAFULT_ORDER = neopixel.GRB
-DEAFULT_PIN = board.D18
+DEFAULT_ORDER = neopixel.GRB
+DEFAULT_PIN = board.D18
 DEFAULT_SPEED = 0.005
 
 
@@ -125,18 +125,18 @@ class Neopixel:
     def __init__(
         self,
         name: str = None,
-        control=DEAFULT_PIN,
+        control=DEFAULT_PIN,
         rows: int = 8,
         cols: int = 32,
         brightness: float = DEFAULT_BRIGHTNESS,
-        pixel_order: str = DEAFULT_ORDER,
+        pixel_order: str = DEFAULT_ORDER,
         auto_write: bool = False,
         **kwargs,
     ):
         if not name:
             name = f"neopixel-{id(self)}"
         if not control:
-            control = DEAFULT_PIN
+            control = DEFAULT_PIN
 
         self.name = name
         self.rows = rows
