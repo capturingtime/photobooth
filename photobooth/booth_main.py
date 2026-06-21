@@ -18,7 +18,7 @@ from urllib.parse import urlencode
 
 import board
 
-from photobooth import RPi, Uploader, state_store
+from photobooth import RPi, Uploader, receipt, state_store
 from photobooth.config import (
     ACTIVE_TEMPLATE,
     ATTRACT_SCROLL_TEXT,
@@ -1165,48 +1165,13 @@ class PhotoBooth:
         the capture window, so the user knows their QR will start working
         once the booth reconnects to the internet.
         """
+        # Exceptions propagate to _print_with_recovery, the canonical logger
+        # for printer failures; logging here too produced duplicate "Receipt
+        # print failed" lines on every failure path. Receipt copy lives in
+        # photobooth.receipt so marketing edits don't touch runtime logic.
         logger.debug("Receipt printing started")
-        try:
-            self.printer.text("Capturing Time Photography")
-            self.printer.ln()
-            self.printer.ln()
-            self.printer.text("Thank you for using our photobooth!")
-            self.printer.ln()
-            self.printer.ln()
-            self.printer.text("Please visit us at http://capturingtimephoto.net")
-            self.printer.ln()
-            self.printer.text("    to schedule your free 30 minute consultation")
-            self.printer.ln()
-            self.printer.text("    for your next portrait session or event!")
-            self.printer.ln()
-            self.printer.ln()
-            self.printer.text("Mention this photobooth when you book your next")
-            self.printer.ln()
-            self.printer.text("session with us & receive an extra 10% discount!")
-            self.printer.ln()
-            self.printer.ln()
-            self.printer.text("Scan the QR code below to download your photo:")
-            self.printer.ln()
-            self.printer.qr(content=url, size=5)
-            self.printer.ln()
-            if pending_notice:
-                self.printer.text(pending_notice)
-                self.printer.ln()
-                self.printer.ln()
-            self.printer.text("Reach us at contact@capturingtimephoto.net")
-            self.printer.ln()
-            self.printer.text("Tag us on")
-            self.printer.ln()
-            self.printer.text("Instagram: @capturingtimephoto")
-            self.printer.ln()
-            self.printer.text("Facebook: @capturingtimephotollc")
-            self.printer.cut()
-            logger.debug("Receipt print complete")
-        except Exception:
-            # _print_with_recovery is the canonical logger for printer
-            # failures; logging here too produced duplicate "Receipt
-            # print failed" lines on every failure path.
-            raise
+        receipt.render(self.printer, url, pending_notice)
+        logger.debug("Receipt print complete")
 
 
 def main() -> None:
