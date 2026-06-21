@@ -25,6 +25,7 @@ SIBLING_ENV_EXAMPLE = (
 )
 
 CONSUMER_SOURCES = [
+    PHOTOBOOTH_ROOT / "photobooth" / "config.py",
     PHOTOBOOTH_ROOT / "photobooth" / "booth_main.py",
     PHOTOBOOTH_ROOT / "photobooth" / "logging_config.py",
 ]

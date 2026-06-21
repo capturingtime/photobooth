@@ -1,41 +1,26 @@
-"""Tests for the ``BOOTH_*`` env-var → module-constant mapping in booth_main.
+"""Tests for the ``BOOTH_*`` env-var → module-constant mapping in
+``photobooth.config``.
 
 These constants are the entire surface for per-booth runtime configuration.
 A rename or typo in either side (the env-var name in
-``/etc/ctp/booth.env`` or the lookup in ``booth_main``) would silently fall
-back to the hardcoded default, which is exactly the failure mode this test
-suite exists to catch.
+``/etc/ctp/booth.env`` or the lookup in ``photobooth.config``) would
+silently fall back to the hardcoded default, which is exactly the failure
+mode this test suite exists to catch.
 
-The booth's hardware deps (``board``, etc.) are stubbed via ``sys.modules`` so
-``booth_main`` can be imported on a dev machine.
+``photobooth.config`` has no hardware imports, so it loads directly on a
+dev machine with no stubbing needed.
 """
 
 import importlib
-import sys
-from unittest.mock import MagicMock
 
 import pytest
 
 
-@pytest.fixture(autouse=True)
-def _stub_board():
-    """Stub ``board`` for the duration of the test session.
+def _reload_config():
+    """Force a clean re-evaluation of config's module-top env-var reads."""
+    import photobooth.config as mod  # noqa: WPS433 — deliberate late import
 
-    ``photobooth.booth_main`` does ``import board`` at module top, which only
-    resolves on a Raspberry Pi with Adafruit-Blinka installed. A MagicMock
-    is sufficient — booth_main only references board's attributes inside
-    functions that run on the live booth, never at import time.
-    """
-    sys.modules.setdefault("board", MagicMock())
-    yield
-
-
-def _reload_booth_main():
-    """Force a clean re-evaluation of booth_main's module-top env-var reads."""
-    if "photobooth.booth_main" in sys.modules:
-        return importlib.reload(sys.modules["photobooth.booth_main"])
-    import photobooth.booth_main as mod  # noqa: WPS433 — deliberate late import
-    return mod
+    return importlib.reload(mod)
 
 
 # ---------------------------------------------------------------------------
@@ -54,7 +39,7 @@ def default_env(monkeypatch):
         "BOOTH_ACTIVE_TEMPLATE",
     ):
         monkeypatch.delenv(key, raising=False)
-    return _reload_booth_main()
+    return _reload_config()
 
 
 def test_default_s3_bucket(default_env):
@@ -105,12 +90,12 @@ def test_default_active_template(default_env):
 )
 def test_env_override(monkeypatch, env_key, const_name, env_value, expected):
     monkeypatch.setenv(env_key, env_value)
-    mod = _reload_booth_main()
+    mod = _reload_config()
     assert getattr(mod, const_name) == expected
 
 
 def test_active_template_empty_string_becomes_none(monkeypatch):
     """Empty env value is documented to disable the compositor (single-shot mode)."""
     monkeypatch.setenv("BOOTH_ACTIVE_TEMPLATE", "")
-    mod = _reload_booth_main()
+    mod = _reload_config()
     assert mod.ACTIVE_TEMPLATE is None
