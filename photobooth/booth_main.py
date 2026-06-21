@@ -132,6 +132,9 @@ SERIES_FINAL_URL = "http://127.0.0.1:8000/main/series_final/"
 SERIES_CAPTURE_URL = "http://127.0.0.1:8000/main/series_capture/"
 UNAVAILABLE_URL = "http://127.0.0.1:8000/main/unavailable/"
 
+# Looping invite scroll shown on the LED panel while at the attract screen.
+ATTRACT_SCROLL_TEXT = "Press the big blue button to begin!  "
+
 # --- Phase 5: unavailable-mode + resume ---
 RESUME_STATE_PATH = os.environ.get("BOOTH_RESUME_STATE_PATH", "/var/lib/photobooth/resume.json")
 CAMERA_UNAVAILABLE_TEXT = "Camera not detected. Check power and USB.  "
@@ -221,7 +224,7 @@ class PhotoBooth:
 
         if not self._pending_resume_shots:
             await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-            attract_text = "Press the big blue button to begin!  "
+            attract_text = ATTRACT_SCROLL_TEXT
         else:
             attract_text = "Press the big blue button to continue!  "
         attract = asyncio.create_task(self.panel.scroll(text=attract_text, speed=0.005, count=999))
@@ -259,15 +262,7 @@ class PhotoBooth:
                     logger.info("Capture cancelled by user")
                     self._clear_resume_state()
                     await self._flush_events()
-                    await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-                    logger.debug("Returning to attract mode")
-                    attract = asyncio.create_task(
-                        self.panel.scroll(
-                            text="Press the big blue button to begin!  ",
-                            speed=0.005,
-                            count=999,
-                        )
-                    )
+                    attract = await self._return_to_attract()
                     continue
 
                 self.rpi.copy_to_last_shot(image_path)
@@ -320,15 +315,7 @@ class PhotoBooth:
                 # returning to attract.
                 self._clear_resume_state()
                 await self._flush_events()
-                await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-                logger.debug("Returning to attract mode")
-                attract = asyncio.create_task(
-                    self.panel.scroll(
-                        text="Press the big blue button to begin!  ",
-                        speed=0.005,
-                        count=999,
-                    )
-                )
+                attract = await self._return_to_attract()
 
             elif event == KEEP_BUTTON:
                 if self.uploader is None:
@@ -358,14 +345,7 @@ class PhotoBooth:
                     attract.cancel()
                     await self._flush_events()
                     await self.panel.scroll(text="Max prints reached, sorry!  ", count=1)
-                    await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-                    attract = asyncio.create_task(
-                        self.panel.scroll(
-                            text="Press the big blue button to begin!  ",
-                            speed=0.005,
-                            count=999,
-                        )
-                    )
+                    attract = await self._return_to_attract()
                     continue
 
                 logger.info("Reprinting receipt for %s", last_shot)
@@ -384,26 +364,12 @@ class PhotoBooth:
                 # (which leaves the kiosk on unavailable.png until something
                 # navigates it away). Capture path already calls display_url
                 # after the print resolves; the reprint path didn't.
-                await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-                attract = asyncio.create_task(
-                    self.panel.scroll(
-                        text="Press the big blue button to begin!  ",
-                        speed=0.005,
-                        count=999,
-                    )
-                )
+                attract = await self._return_to_attract()
 
             elif event == REDO_BUTTON:
                 attract.cancel()
                 await self._flush_events()
-                await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-                attract = asyncio.create_task(
-                    self.panel.scroll(
-                        text="Press the big blue button to begin!  ",
-                        speed=0.005,
-                        count=999,
-                    )
-                )
+                attract = await self._return_to_attract()
 
     async def _flush_events(self) -> None:
         """Drain any stale button events left over from the previous action.
@@ -417,6 +383,19 @@ class PhotoBooth:
                 self.rpi.event_queue.get_nowait()
             except Exception:
                 break
+
+    async def _return_to_attract(self) -> asyncio.Task:
+        """Navigate the kiosk to the attract screen and start the looping
+        invite scroll on the LED panel.
+
+        Returns the new scroll task so the caller can cancel it when the
+        next capture or print begins.
+        """
+        await self.display_url_with_context(ATTRACT_URL, **self._series_params())
+        logger.debug("Returning to attract mode")
+        return asyncio.create_task(
+            self.panel.scroll(text=ATTRACT_SCROLL_TEXT, speed=0.005, count=999)
+        )
 
     # ------------------------------------------------------------------
     # Phase 5: unavailable-mode + resume
@@ -442,19 +421,6 @@ class PhotoBooth:
             state_store.delete_if_exists(RESUME_STATE_PATH)
         except Exception as exc:
             logger.warning("Resume state delete failed: %s", exc)
-
-    def _classify_error(self, exc: BaseException, hint: Optional[str] = None) -> tuple:
-        """Map an exception to (component_name, neopixel scroll text).
-
-        ``hint`` lets the caller pin the component (camera vs printer) when
-        the exception type alone is ambiguous (e.g. ``RuntimeError`` is
-        raised by both ``gphoto2`` and ``escpos`` paths).
-        """
-        if hint == "printer":
-            return ("printer", PRINTER_UNAVAILABLE_TEXT)
-        # Default: camera. Phase 5 only wires camera + printer; internet
-        # failures are Phase 6's responsibility (offline queue).
-        return ("camera", CAMERA_UNAVAILABLE_TEXT)
 
     async def display_url_with_context(self, url: str, **params) -> None:
         """Navigate to ``url`` with optional query-string params.
@@ -632,6 +598,19 @@ class PhotoBooth:
             )
         )
         pending_notice = None
+
+        async def _queue_for_retry() -> None:
+            # Shared failure tail for both the timeout and the generic
+            # boto3-error arms: queue the capture under the deterministic
+            # key, then force a net_www recheck so the queue worker waits
+            # for recovery instead of pounding on a known-bad link.
+            self._upload_queue.enqueue(key, image_path)
+            if health is not None:
+                try:
+                    await health._probe_once("net_www")
+                except Exception as probe_exc:
+                    logger.debug("net_www probe after upload failure: %s", probe_exc)
+
         try:
             try:
                 await self.uploader.upload_with_timeout(
@@ -645,26 +624,14 @@ class PhotoBooth:
                     UPLOAD_TIMEOUT_SECONDS,
                     key,
                 )
-                self._upload_queue.enqueue(key, image_path)
+                await _queue_for_retry()
                 pending_notice = PENDING_UPLOAD_NOTICE
-                # Force a recheck so the queue worker waits for recovery
-                # instead of pounding on a known-bad link.
-                if health is not None:
-                    try:
-                        await health._probe_once("net_www")
-                    except Exception as probe_exc:
-                        logger.debug("net_www probe after upload timeout: %s", probe_exc)
             except Exception as exc:
                 # boto3 client/connection errors land here; any of them
                 # signal "S3 isn't usable right now" — queue and move on.
                 logger.warning("Upload failed (%s) — enqueueing key=%s", exc, key)
-                self._upload_queue.enqueue(key, image_path)
+                await _queue_for_retry()
                 pending_notice = PENDING_UPLOAD_NOTICE
-                if health is not None:
-                    try:
-                        await health._probe_once("net_www")
-                    except Exception as probe_exc:
-                        logger.debug("net_www probe after upload error: %s", probe_exc)
         finally:
             scroll_task.cancel()
             try:
@@ -1013,8 +980,7 @@ class PhotoBooth:
                 twinkle_task.cancel()
             self.panel.clear()
             logger.error("Camera capture failed: %s", exc)
-            component, scroll_text = self._classify_error(exc, hint="camera")
-            await self._enter_unavailable(component, scroll_text)
+            await self._enter_unavailable("camera", CAMERA_UNAVAILABLE_TEXT)
             # USB re-enumeration on power cycle reassigns the gphoto2
             # ``--port`` address; the stored value goes stale and the
             # next capture would silently return a phantom file again.
@@ -1215,8 +1181,7 @@ class PhotoBooth:
             return
         except Exception as exc:
             logger.error("Receipt print failed: %s", exc)
-            component, scroll_text = self._classify_error(exc, hint="printer")
-            await self._enter_unavailable(component, scroll_text)
+            await self._enter_unavailable("printer", PRINTER_UNAVAILABLE_TEXT)
         # USB re-enumeration on power cycle invalidates the cached escpos
         # Usb handle; the next print would re-raise Errno 19 even though
         # the probe reports the printer as ready. Rebuild before retry.

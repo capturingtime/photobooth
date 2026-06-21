@@ -28,9 +28,9 @@ MIN_VALID_CAPTURE_BYTES = 100_000
 class CameraCaptureError(RuntimeError):
     """Raised when gphoto2 returns without a valid image on disk.
 
-    Bridges Phase 5: ``_take_one_shot`` catches this, ``_classify_error``
-    maps it to ``("camera", CAMERA_UNAVAILABLE_TEXT)``, and the booth
-    enters unavailable mode + waits for HealthMonitor recovery.
+    Bridges Phase 5: ``_take_one_shot`` catches this and enters
+    unavailable mode (``"camera"`` / ``CAMERA_UNAVAILABLE_TEXT``), then
+    waits for HealthMonitor recovery.
     """
 
 

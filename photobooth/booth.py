@@ -34,14 +34,6 @@ def arp_list(broadcast_ip: str = "255.255.255.255") -> list:
     return result
 
 
-def run_local_cmd(cmd: str):
-    """Run a shell command synchronously. Used during startup only."""
-    try:
-        return subprocess.run(cmd, shell=True, capture_output=True)
-    except Exception as err:
-        logger.warning("run_local_cmd failed: %s", err)
-
-
 async def probe_internet_available(host: str = "http://google.com") -> bool:
     """Async wrapper around ``connect`` for ``HealthMonitor`` use (v0.5.0 Phase 4)."""
     loop = asyncio.get_running_loop()
