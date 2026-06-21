@@ -326,14 +326,6 @@ class Neopixel:
         self.clear()
         return True
 
-    async def flash(self, **kwargs):
-        """Flash text on the panel (placeholder — delegates to scroll)."""
-        await self.scroll(**kwargs)
-
-    async def cycle_text(self, **kwargs):
-        """Cycle through text on the panel (placeholder — delegates to scroll)."""
-        await self.scroll(**kwargs)
-
     def clear(self) -> bool:
         """Set all pixels to OFF immediately."""
         self.np.fill(OFF)
