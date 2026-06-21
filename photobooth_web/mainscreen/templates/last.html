@@ -1,7 +1,0 @@
-{% extends "base_centered.html" %}
-{% load static %}
-{% block image %}{% static 'img/last.jpg' %}{% endblock %}
-{% block body %}
-  {{ block.super }}
-  <script>setTimeout("self.close()", 5000);</script>
-{% endblock %}

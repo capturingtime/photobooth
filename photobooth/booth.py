@@ -131,7 +131,8 @@ class Booth:
         return self._kiosk_process
 
     def copy_to_last_shot(self, last_shot: str) -> bool:
-        """Copy the captured image to the path Django serves as last.html background."""
+        """Copy the captured image to the ``last.jpg`` the kiosk review and
+        final screens layer beneath their overlay PNGs."""
         if not getattr(self, "_last_shot_tgt", None):
             self._init_last_shot()
         try:
@@ -170,10 +171,6 @@ class Booth:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-
-    async def display_last_shot(self) -> None:
-        """Navigate the kiosk browser to the last-shot display page."""
-        await self.display_url("http://127.0.0.1:8000/main/last/")
 
     def reset_last_shot(self) -> bool:
         """Reset last.jpg to the placeholder image."""

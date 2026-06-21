@@ -28,10 +28,6 @@ def index(request):
     return render(request, "index.html")
 
 
-def last(request):
-    return render(request, "last.html")
-
-
 def attract(request):
     return render(request, "attract.html", _series_context(request))
 
