@@ -1,0 +1,12 @@
+{% extends "base.html" %}
+{# Centered full-screen image with an optional banner below it. #}
+{% block style %}
+    .imgbox { display: grid; height: 100%; }
+    .center-fit { max-width: 100%; max-height: 100vh; margin: auto; }
+{% endblock %}
+{% block body %}
+  <div class="imgbox">
+    <img src="{% block image %}{% endblock %}" class="center-fit">
+  </div>
+  {% block banner %}{% endblock %}
+{% endblock %}

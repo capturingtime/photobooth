@@ -1,51 +1,9 @@
+{% extends "base_overlay.html" %}
 {% load static %}
-<!DOCTYPE html>
-<html>
-<head>
-    <link rel="stylesheet" href="{% static "css/series-banner.css" %}">
-    <style>
-        body { background-color: black; margin: 0; padding: 0; }
-        .frame {
-            position: relative;
-            width: 1920px;
-            height: 1080px;
-            visibility: hidden;
-        }
-        .photo {
-            position: absolute;
-            top: 135px;
-            left: 352px;
-            width: 1215px;
-            height: 810px;
-            object-fit: cover;
-            object-position: center;
-        }
-        .overlay {
-            position: absolute;
-            top: 0;
-            left: 0;
-            width: 1920px;
-            height: 1080px;
-        }
-    </style>
-</head>
-<body>
-  <div class="frame" id="frame">
-    <img class="photo" id="photo">
-    <img class="overlay" id="overlay" src="{% static "img/last_capture.png" %}">
-    {% if mode == "series" %}
-      <div class="series-banner">Shot {{ shot }} of {{ total }}</div>
-    {% endif %}
-  </div>
-  <script>
-    var ph = document.getElementById('photo');
-    var ov = document.getElementById('overlay');
-    var fr = document.getElementById('frame');
-    function reveal() { if (ph.complete && ov.complete) fr.style.visibility = 'visible'; }
-    ph.onload = reveal;
-    ov.onload = reveal;
-    ph.src = "{% static 'img/last.jpg' %}?" + Date.now();
-    if (ph.complete && ov.complete) reveal();
-  </script>
-</body>
-</html>
+{% block head %}<link rel="stylesheet" href="{% static 'css/series-banner.css' %}">{% endblock %}
+{% block overlay_image %}{% static 'img/last_capture.png' %}{% endblock %}
+{% block banner %}
+  {% if mode == "series" %}
+    <div class="series-banner">Shot {{ shot }} of {{ total }}</div>
+  {% endif %}
+{% endblock %}
