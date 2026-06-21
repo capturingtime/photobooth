@@ -19,32 +19,34 @@ brightness = 0.05
 scrollSpeed = 0.12
 
 ORDER = neopixel.GRB
-np = neopixel.NeoPixel(pixel_pin, num_pixels, brightness=brightness, auto_write=False, pixel_order=ORDER)  # noqa: E501
+np = neopixel.NeoPixel(
+    pixel_pin, num_pixels, brightness=brightness, auto_write=False, pixel_order=ORDER
+)  # noqa: E501
 
 
 def getIndex(x, y):
-    """ This function, given a relative (x, y) coordinate, will return the corresponding pixel index
-        Example:  0, 0 = 248 (top left pixel)
-                  0, 7 = 255 (bottom left pixel)
-                 31, 7 = 0   (bottom right pixel)
-                 31, 0 = 7   (top right pixel)
+    """This function, given a relative (x, y) coordinate, will return the corresponding pixel index
+    Example:  0, 0 = 248 (top left pixel)
+              0, 7 = 255 (bottom left pixel)
+             31, 7 = 0   (bottom right pixel)
+             31, 0 = 7   (top right pixel)
 
-        NeoPixel Panels use a snake like numbering for the pixel index
-        Example 8x32 grid
-        248--247  xxx--007
-         |    |    |    |
-         |    |    |    |
-         |    |    |    |
-         |    |    |    |
-         |    |    |    |
-         |    |    |    |
-        255  240--xxx  000
+    NeoPixel Panels use a snake like numbering for the pixel index
+    Example 8x32 grid
+    248--247  xxx--007
+     |    |    |    |
+     |    |    |    |
+     |    |    |    |
+     |    |    |    |
+     |    |    |    |
+     |    |    |    |
+    255  240--xxx  000
     """
-    x = display_width-x-1
+    x = display_width - x - 1
     if x % 2 != 0:
-        return (x*8)+y
+        return (x * 8) + y
     else:
-        return (x*8)+(7-y)
+        return (x * 8) + (7 - y)
 
 
 font = ImageFont.truetype("5x7.ttf", 8)
@@ -52,7 +54,7 @@ text_width, text_height = font.getsize(text)
 # image = Image.new('P', (text_width + display_width + display_width, display_height), 0)
 
 # For some reason we need to remove 1 px from the image width for it to clear smoothly at the end
-image = Image.new('P', (text_width + (display_width * 2) - 1, display_height), 0)
+image = Image.new("P", (text_width + (display_width * 2) - 1, display_height), 0)
 draw = ImageDraw.Draw(image)
 
 # .text(x_offset, y_offset)
@@ -85,5 +87,6 @@ def scroll(color=WHITE, count=1, speed=scrollSpeed):
             #     i = display_width
     # np.fill(OFF)
     # np.show()
+
 
 scroll()

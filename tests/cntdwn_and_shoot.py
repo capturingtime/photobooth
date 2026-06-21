@@ -29,10 +29,12 @@ while True:
 
         subprocess.check_output(
             f"gphoto2 --capture-image-and-download --filename {filename}",
-            stderr=subprocess.STDOUT, shell=True)
+            stderr=subprocess.STDOUT,
+            shell=True,
+        )
 
         reset_7seg()
 
         subprocess.run(f"gpicview {filename} &", stderr=subprocess.STDOUT, shell=True)
 
-    time.sleep(.05)
+    time.sleep(0.05)

@@ -21,9 +21,7 @@ pytest.importorskip("utilities", reason="ctp-utilities not installed")
 pytest.importorskip("boto3")
 
 
-KEY_PATTERN = re.compile(
-    r"^[\w-]+/\d{4}/\d{2}/\d{2}/[A-Za-z0-9_-]{8,}_.+$"
-)
+KEY_PATTERN = re.compile(r"^[\w-]+/\d{4}/\d{2}/\d{2}/[A-Za-z0-9_-]{8,}_.+$")
 
 
 @pytest.fixture

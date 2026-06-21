@@ -39,8 +39,7 @@ class Uploader:
         # cert mismatch (*.s3.amazonaws.com doesn't cover sub-dotted names).
         _probe = boto3.client("s3")
         region = (
-            _probe.get_bucket_location(Bucket=bucket_name).get("LocationConstraint")
-            or "us-east-1"
+            _probe.get_bucket_location(Bucket=bucket_name).get("LocationConstraint") or "us-east-1"
         )
         self._s3_client = boto3.client(
             "s3",

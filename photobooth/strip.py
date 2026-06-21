@@ -1,4 +1,5 @@
 """Photo strip compositor — composites N captured images onto a PNG template."""
+
 from PIL import Image
 
 
@@ -16,9 +17,7 @@ class PhotoStrip:
         self.canvas_size: tuple = (cfg["canvas"]["width"], cfg["canvas"]["height"])
         self.slots: list = cfg["slots"]
         if len(self.slots) != self.shot_count:
-            raise ValueError(
-                f"slot count ({len(self.slots)}) != shot_count ({self.shot_count})"
-            )
+            raise ValueError(f"slot count ({len(self.slots)}) != shot_count ({self.shot_count})")
         self.columns: int = cfg.get("columns", 1)
         self.template = Image.open(data["template_path"]).convert("RGBA")
 

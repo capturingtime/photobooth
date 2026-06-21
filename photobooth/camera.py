@@ -44,9 +44,7 @@ def run_local_cmd(cmd: str):
 
 def check_os():
     if not platform == "linux":
-        raise RuntimeError(
-            f"Linux is the only supported OS for this class. Detected: {platform}"
-        )
+        raise RuntimeError(f"Linux is the only supported OS for this class. Detected: {platform}")
     return True
 
 
@@ -60,9 +58,7 @@ def check_dir_rw_or_make(tgt_dir: str, mkdir_perms=0o766) -> bool:
         if not os.access(tgt_dir, os.W_OK) and not os.access(tgt_dir, os.R_OK):
             status = os.stat(tgt_dir)
             p = oct(status.st_mode)[-3:]
-            raise OSError(
-                f"Target directory '{tgt_dir}' exists, but not RW. Permission: {p}"
-            )
+            raise OSError(f"Target directory '{tgt_dir}' exists, but not RW. Permission: {p}")
         return True
     else:
         os.mkdir(tgt_dir)
@@ -172,9 +168,7 @@ async def capture_and_download_async(download_dir: str, camera: str, port: str) 
     stdout, stderr = await proc.communicate()
     if proc.returncode != 0:
         raise RuntimeError(
-            f"gphoto2 capture failed.\n"
-            f"stdout: {stdout.decode()}\n"
-            f"stderr: {stderr.decode()}"
+            f"gphoto2 capture failed.\n" f"stdout: {stdout.decode()}\n" f"stderr: {stderr.decode()}"
         )
     return filename
 
@@ -221,9 +215,7 @@ class Camera:
         self.name = name
         self.model = model
         self.output_dir = (
-            output_dir
-            if not output_dir.startswith("~")
-            else os.path.expanduser(output_dir)
+            output_dir if not output_dir.startswith("~") else os.path.expanduser(output_dir)
         )
 
         # Plain state — no Manager() proxies needed in a single-process asyncio app
@@ -319,9 +311,7 @@ class Camera:
         if not self._ready:
             raise RuntimeError("Camera is not ready")
         self._ready = False
-        pic = capture_and_download(
-            download_dir=self.output_dir, camera=self.model, port=self.addr
-        )
+        pic = capture_and_download(download_dir=self.output_dir, camera=self.model, port=self.addr)
         self._captures.append(pic)
         self._last_shot = pic
         self._ready = True

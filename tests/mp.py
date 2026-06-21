@@ -1,14 +1,17 @@
 # Works
 from multiprocessing import Process, Manager, Lock
+
 # from multiprocessing.managers import Value
 # from multiprocessing import Value
 from ctypes import c_wchar_p
 
-class Component():
+
+class Component:
     def __init__(self):
         self._test = Manager().Value(c_wchar_p, "True")  # Works
         # self._test = Value(c_wchar_p, "True", lock=Lock())  # Doesn't Work
         # self._test = Value('d', 5.0, lock=Lock())  # Works
+
     def run(self):
         print(f"Memory Address before change: {self._test}")
         print(f"Value in Thread Before: {self._test.value}")
@@ -17,7 +20,8 @@ class Component():
         print(f"Memory Address after change: {self._test}")
         print(f"Value in Thread After: {self._test.value}")
 
-if __name__ == '__main__':
+
+if __name__ == "__main__":
 
     c = Component()
     p = Process(target=c.run)

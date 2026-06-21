@@ -153,16 +153,12 @@ class Booth:
         import websockets
 
         try:
-            with urllib.request.urlopen(
-                "http://localhost:9222/json", timeout=1
-            ) as resp:
+            with urllib.request.urlopen("http://localhost:9222/json", timeout=1) as resp:
                 tabs = json.loads(resp.read())
             ws_url = tabs[0]["webSocketDebuggerUrl"]
             async with websockets.connect(ws_url) as ws:
                 await ws.send(
-                    json.dumps(
-                        {"id": 1, "method": "Page.navigate", "params": {"url": url}}
-                    )
+                    json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}})
                 )
                 await ws.recv()
         except Exception:
@@ -208,9 +204,7 @@ class Booth:
     def _init_neopixel(**kwargs):
         return Neopixel(**kwargs)
 
-    def add_neopixel(
-        self, name: str = None, control=None, rows: int = 8, cols: int = 32, **kwargs
-    ):
+    def add_neopixel(self, name: str = None, control=None, rows: int = 8, cols: int = 32, **kwargs):
         if not getattr(self, "neopixels", None):
             self.neopixels = list()
         if not name:

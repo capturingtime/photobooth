@@ -100,7 +100,9 @@ class RPi(Booth):
             # up). See BACKLOG.md → "Camera sleep triggers a spurious capture".
             logger.debug(
                 "Button event: label=%s pin=%d queue_depth_before=%d",
-                lbl, pin, self.event_queue.qsize(),
+                lbl,
+                pin,
+                self.event_queue.qsize(),
             )
             loop.call_soon_threadsafe(self.event_queue.put_nowait, lbl)
 
@@ -110,9 +112,7 @@ class RPi(Booth):
                 pin,
                 GPIO.FALLING,
                 bouncetime=500,
-                callback=lambda channel, lbl=label, pin=pin: _on_press(
-                    channel, lbl=lbl, pin=pin
-                ),
+                callback=lambda channel, lbl=label, pin=pin: _on_press(channel, lbl=lbl, pin=pin),
             )
         logger.info("GPIO event detection registered")
 
@@ -147,15 +147,11 @@ class RPi(Booth):
             self.except_and_log(ex_msg="'label' is required for _get_pin_by_label()")
         pin = [v for k, v in self.gpio.pins.items() if label == k]
         if not pin:
-            self.except_and_log(
-                ex_msg=f"No pin found for '{label}' in gpio.pins: {self.gpio.pins}"
-            )
+            self.except_and_log(ex_msg=f"No pin found for '{label}' in gpio.pins: {self.gpio.pins}")
             return None
         return pin[0]
 
-    def _check_pin_use(
-        self, label: str = "", pin: int = 0, pintype: str = "led"
-    ) -> bool:
+    def _check_pin_use(self, label: str = "", pin: int = 0, pintype: str = "led") -> bool:
         if not label and not pin:
             logger.warning("One of 'label' or 'pin' is required for _check_pin_use()")
             return None

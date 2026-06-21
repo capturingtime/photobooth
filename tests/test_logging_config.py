@@ -63,8 +63,9 @@ def test_bad_level_falls_back_to_info_and_warns(monkeypatch, caplog):
     root = logging.getLogger("photobooth")
     assert root.level == logging.INFO
     warnings = [
-        r for r in caplog.records if "BOOTH_LOG_LEVEL" in r.getMessage() or
-        (r.args and "BOGUS" in str(r.args))
+        r
+        for r in caplog.records
+        if "BOOTH_LOG_LEVEL" in r.getMessage() or (r.args and "BOGUS" in str(r.args))
     ]
     assert warnings, "expected a WARNING about the bad BOOTH_LOG_LEVEL value"
 
@@ -93,9 +94,7 @@ def test_file_handler_attached_at_debug():
 def test_stderr_handler_attached_at_warning():
     setup_logging()
     stream_handlers = [
-        h
-        for h in logging.getLogger("photobooth").handlers
-        if type(h) is logging.StreamHandler
+        h for h in logging.getLogger("photobooth").handlers if type(h) is logging.StreamHandler
     ]
     assert len(stream_handlers) == 1
     assert stream_handlers[0].level == logging.WARNING
@@ -111,6 +110,4 @@ def test_unwritable_log_file_does_not_raise(monkeypatch):
 
     handlers = logging.getLogger("photobooth").handlers
     assert any(type(h) is logging.StreamHandler for h in handlers)
-    assert not any(
-        isinstance(h, logging.handlers.RotatingFileHandler) for h in handlers
-    )
+    assert not any(isinstance(h, logging.handlers.RotatingFileHandler) for h in handlers)

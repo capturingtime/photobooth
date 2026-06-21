@@ -39,4 +39,4 @@ while True:
         np.fill(OFF)
         np.show()
 
-    time.sleep(.05)
+    time.sleep(0.05)

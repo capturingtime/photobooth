@@ -1,4 +1,5 @@
 """Tests for photobooth.strip and photobooth.template_loader."""
+
 import json
 import pytest
 from pathlib import Path
@@ -110,9 +111,7 @@ class TestLocalTemplateLoader:
     def test_load_returns_template_path_string(self, template_dir):
         loader = LocalTemplateLoader(str(template_dir))
         result = loader.load("strip_test")
-        assert result["template_path"] == str(
-            template_dir / "strip_test" / "template.png"
-        )
+        assert result["template_path"] == str(template_dir / "strip_test" / "template.png")
 
     def test_load_returns_parsed_config(self, template_dir):
         loader = LocalTemplateLoader(str(template_dir))
@@ -388,9 +387,7 @@ class TestRealTemplate:
         # TestExpandForPrint below.
         assert result.size == (600, 1800)
 
-    def test_expand_for_print_doubles_strip_for_columns_2(
-        self, real_strip, real_shots, tmp_path
-    ):
+    def test_expand_for_print_doubles_strip_for_columns_2(self, real_strip, real_shots, tmp_path):
         """The real sidecar has columns=2 — expand_for_print produces 1200×1800."""
         single = str(tmp_path / "single.jpg")
         real_strip.compose(real_shots, single)
@@ -401,9 +398,7 @@ class TestRealTemplate:
         assert out == printable
         assert Image.open(out).size == (1200, 1800)
 
-    def test_expand_for_print_passthrough_when_columns_le_1(
-        self, strip, shots, tmp_path
-    ):
+    def test_expand_for_print_passthrough_when_columns_le_1(self, strip, shots, tmp_path):
         """columns=1 (or absent) → no expansion, input path returned unchanged.
 
         The default sidecar fixture has no ``columns`` key, so columns defaults
@@ -417,9 +412,9 @@ class TestRealTemplate:
         out = strip.expand_for_print(single, str(tmp_path / "should_not_exist.jpg"))
 
         assert out == single, "passthrough must return input_path unchanged"
-        assert not (tmp_path / "should_not_exist.jpg").exists(), (
-            "no output file should be written when columns <= 1"
-        )
+        assert not (
+            tmp_path / "should_not_exist.jpg"
+        ).exists(), "no output file should be written when columns <= 1"
 
     def test_expand_for_print_left_and_right_halves_are_identical(
         self, real_strip, real_shots, tmp_path
@@ -435,9 +430,9 @@ class TestRealTemplate:
         # JPEG re-encoding can introduce subpixel differences; sample a
         # handful of points to verify the duplication, not a bit-for-bit match.
         for x, y in [(100, 100), (300, 900), (500, 1700)]:
-            assert left.getpixel((x, y)) == right.getpixel((x, y)), (
-                f"left/right halves differ at ({x},{y})"
-            )
+            assert left.getpixel((x, y)) == right.getpixel(
+                (x, y)
+            ), f"left/right halves differ at ({x},{y})"
 
     def test_compose_slot_colors_visible(self, real_strip, real_shots, tmp_path):
         """Each photo's dominant color should be visible inside its slot."""
@@ -451,6 +446,6 @@ class TestRealTemplate:
             cx = slot["x"] + slot["width"] // 2
             cy = slot["y"] + slot["height"] // 2
             px = result.getpixel((cx, cy))
-            assert px[dominant_ch] > px[(dominant_ch + 1) % 3], (
-                f"slot at y={slot['y']}: expected channel {dominant_ch} dominant, got {px}"
-            )
+            assert (
+                px[dominant_ch] > px[(dominant_ch + 1) % 3]
+            ), f"slot at y={slot['y']}: expected channel {dominant_ch} dominant, got {px}"

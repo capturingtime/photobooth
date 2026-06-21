@@ -103,8 +103,7 @@ async def test_take_one_shot_countdown_timing(booth):
     target = 2.0
     tolerance = 0.10  # ≈ ±5 %
     assert abs(clock["t"] - target) <= tolerance, (
-        f"Countdown ended at sim t={clock['t']:.3f}s, "
-        f"expected {target}s ±{tolerance}s"
+        f"Countdown ended at sim t={clock['t']:.3f}s, " f"expected {target}s ±{tolerance}s"
     )
     # capture_async must dispatch no later than Smile! starts — the entire
     # point of Phase 1 is to overlap the two.

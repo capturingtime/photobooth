@@ -217,16 +217,12 @@ class Neopixel:
     ) -> Image.Image:
         """Render text into a PIL Image sized for the panel (used by scroll)."""
         if self.rows < 5:
-            raise ValueError(
-                f"Cannot scroll on a board with rows < 5. Board rows: {self.rows}"
-            )
+            raise ValueError(f"Cannot scroll on a board with rows < 5. Board rows: {self.rows}")
         text = str(text)
         if not font_name.endswith(".ttf"):
             font_name = f"{font_name}.ttf"
         if not os.path.exists(f"{RESOURCES}/{font_name}"):
-            raise ValueError(
-                f"Font '{font_name}' not found. Place it in ./resources"
-            )
+            raise ValueError(f"Font '{font_name}' not found. Place it in ./resources")
         font = ImageFont.truetype(f"{RESOURCES}/{font_name}", font_pt)
         text_width, _ = font.getsize(text)
         # cols*2 padding on each side allows text to fully scroll on and off the panel
