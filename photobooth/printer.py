@@ -179,15 +179,3 @@ class Printer:
         https://github.com/python-escpos/python-escpos/blob/cbe38648f50dd42e25563bd8603953eaa13cb7f6/src/escpos/escpos.py#L134
         """
         return self.printer.qr(*args, **kwargs)
-
-    # TODO :
-    # Possible answer to a dynamic pass through method
-    # Disabling because i dont feel like testing it right now
-    # def __getattr__(self, name):
-    #     try:
-    #         method = setattr(self, getattr(Usb, name))
-    #     except Exception as err:
-    #         logger.error("Printer USB error: %s", err)
-
-    #     else:
-    #         return method
