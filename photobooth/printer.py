@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import logging
 
 from escpos.printer import Usb
@@ -96,21 +97,23 @@ class Printer:
         self.name = name
 
         if model:
-            self.printer_spec = PRINTER_MAP.get(str(model), dict())
+            spec = PRINTER_MAP.get(str(model), dict())
         else:
-            self.printer_spec = PRINTER_MAP.get("default")
+            spec = PRINTER_MAP.get("default")
+
+        # Deep-copy so per-instance kwarg overrides below mutate this
+        # instance only — not the shared PRINTER_MAP entry (which would
+        # leak config across printers and across test runs).
+        self.printer_spec = copy.deepcopy(spec)
 
         self.model = self.printer_spec.get("model", "unknown")
 
-        valid_kwargs = getfullargspec(Usb)
-        # ['self', 'idVendor', 'idProduct', 'timeout', 'in_ep', 'out_ep']
-
-        # Look for kwargs passed that match a kwarg for Usb() and override
-        for k, v in kwargs:
-            if k in valid_kwargs:
-                self.printer_spec["config"][k] = kwargs.pop(k, None)
-
-        self.inputs = locals()
+        # Override any escpos ``Usb`` config kwarg the caller passed
+        # explicitly (idVendor / idProduct / timeout / in_ep / out_ep).
+        valid_usb_args = getfullargspec(Usb).args
+        for k, v in kwargs.items():
+            if k in valid_usb_args:
+                self.printer_spec["config"][k] = v
 
         self._config = self.printer_spec["config"]
         self.printer = Usb(**self._config)
