@@ -4,7 +4,8 @@ Console entry point: ``photobooth-run``.
 
 Runtime config is read from environment variables (typically loaded by
 systemd via ``EnvironmentFile=-/etc/ctp/booth.env``). Each key falls back
-to the hardcoded default below, so an empty/missing env file is safe.
+to a hardcoded default in ``photobooth.config``, so an empty/missing env
+file is safe.
 """
 
 import asyncio
@@ -17,11 +18,44 @@ from urllib.parse import urlencode
 
 import board
 
-from photobooth import RPi, Uploader, state_store
+from photobooth import RPi, Uploader, receipt, state_store
+from photobooth.config import (
+    ACTIVE_TEMPLATE,
+    ATTRACT_SCROLL_TEXT,
+    ATTRACT_URL,
+    BOOTH_DIR,
+    CAMERA_MODEL,
+    CAMERA_STARTUP_CONFIG,
+    CAMERA_UNAVAILABLE_TEXT,
+    CAPTURE_PHRASES,
+    HEALTH_RECHECK_INTERVAL,
+    HEALTH_TIMEOUT_CAMERA,
+    HEALTH_TIMEOUT_NEOPIXEL,
+    HEALTH_TIMEOUT_NET_LOCAL,
+    HEALTH_TIMEOUT_NET_WWW,
+    HEALTH_TIMEOUT_PRINTER,
+    HEALTH_TIMEOUT_WEB,
+    KEEP_BUTTON,
+    MAX_PRINTS,
+    PRINTER_UNAVAILABLE_TEXT,
+    REDO_BUTTON,
+    RESUME_STATE_PATH,
+    REVIEW_URL,
+    S3_BUCKET,
+    SERIES_CAPTURE_URL,
+    SERIES_FINAL_URL,
+    SINGLE_FINAL_URL,
+    TEMPLATE_BASE_DIR,
+    UNAVAILABLE_MIN_HOLD_SECONDS,
+    UNAVAILABLE_SCROLL_COLOR,
+    UNAVAILABLE_URL,
+    UPLOAD_QUEUE_PATH,
+)
 from photobooth.health import HealthMonitor
 from photobooth.logging_config import setup_logging
 from photobooth.strip import PhotoStrip
 from photobooth.template_loader import LocalTemplateLoader
+from photobooth.upload_flow import UploadFlowMixin
 from photobooth.upload_queue import UploadQueue
 
 # Phase 4 health probes are imported lazily inside ``_startup`` so the
@@ -78,87 +112,8 @@ def _load_probes() -> None:
 
 logger = logging.getLogger(__name__)
 
-# --- Hardware / storage ---
-S3_BUCKET = os.environ.get("BOOTH_S3_BUCKET", "public.capturingtimephoto.net")
-BOOTH_DIR = os.environ.get("BOOTH_IMAGE_DIR", "/opt/booth_images")
-CAMERA_MODEL = os.environ.get("BOOTH_CAMERA_MODEL", "Canon EOS 800D")
-CAMERA_STARTUP_CONFIG = {
-    "autoexposuremode": 3,  # Manual — prevents built-in flash from auto-firing
-}
-MAX_PRINTS = int(os.environ.get("BOOTH_MAX_PRINTS", "3"))
 
-# --- Startup health-probe timeouts (v0.5.0 Phase 4) ---
-# Required components raise on miss so systemd can restart the service.
-# Optional components log + continue (degraded mode).
-HEALTH_TIMEOUT_WEB = 30.0  # Django subprocess we just spawned — fast.
-HEALTH_TIMEOUT_NEOPIXEL = 300.0  # Required — long retry window.
-HEALTH_TIMEOUT_CAMERA = 300.0  # Required — covers swapping batteries / USB.
-HEALTH_TIMEOUT_PRINTER = 300.0  # Required (receipt) — long retry window.
-HEALTH_TIMEOUT_NET_LOCAL = 5.0  # Optional — quick check, no blocking.
-HEALTH_TIMEOUT_NET_WWW = 5.0  # Optional — quick check, no blocking.
-HEALTH_RECHECK_INTERVAL = 10.0  # Background re-probe cadence for unavailable.
-
-# --- Print compositor templates (folders under TEMPLATE_BASE_DIR) ---
-# BOOTH_ACTIVE_TEMPLATE: unset/empty = plain single-shot
-#                        folder with shot_count=1 = single shot + final overlay
-#                        folder with shot_count>1 = series / strip mode
-TEMPLATE_BASE_DIR = os.environ.get("BOOTH_TEMPLATE_BASE_DIR", "/opt/photobooth/templates")
-ACTIVE_TEMPLATE = os.environ.get("BOOTH_ACTIVE_TEMPLATE", "strip_test_template") or None
-
-# --- Button roles (GPIO event labels — context-dependent) ---
-# KEEP_BUTTON  GPIO 23 green: keep (review) | print receipt (idle) | show last shot (series_capture)
-# REDO_BUTTON  GPIO 24 red:   redo (review) | start over (series_capture)
-# "capture"    GPIO 25 blue:  start capture (idle) | continue / next shot (review)
-KEEP_BUTTON = "green"  # GPIO 23 / pin 16
-REDO_BUTTON = "red"  # GPIO 24 / pin 18
-
-# --- Post-capture reaction phrases (one is chosen at random) ---
-CAPTURE_PHRASES = [
-    "Awesome!  ",
-    "Looking great!  ",
-    "Love it!  ",
-    "Stunning!  ",
-    "Perfect shot!  ",
-    "Beautiful!  ",
-    "Amazing!  ",
-    "That's the one!  ",
-]
-
-# --- Django screen URLs ---
-ATTRACT_URL = "http://127.0.0.1:8000/main/attract/"
-REVIEW_URL = "http://127.0.0.1:8000/main/last_capture/"
-SINGLE_FINAL_URL = "http://127.0.0.1:8000/main/single_final/"
-SERIES_FINAL_URL = "http://127.0.0.1:8000/main/series_final/"
-SERIES_CAPTURE_URL = "http://127.0.0.1:8000/main/series_capture/"
-UNAVAILABLE_URL = "http://127.0.0.1:8000/main/unavailable/"
-
-# --- Phase 5: unavailable-mode + resume ---
-RESUME_STATE_PATH = os.environ.get("BOOTH_RESUME_STATE_PATH", "/var/lib/photobooth/resume.json")
-CAMERA_UNAVAILABLE_TEXT = "Camera not detected. Check power and USB.  "
-PRINTER_UNAVAILABLE_TEXT = "Printer not responding  "
-UNAVAILABLE_SCROLL_COLOR = (255, 0, 0)  # RED — inlined to avoid importing neopixel.RED
-# Minimum time to hold the unavailable screen even after the probe says
-# ready, so a fast recovery (e.g. USB re-enumeration completes within 1s
-# of the failed capture) doesn't flash by before the user can register it.
-UNAVAILABLE_MIN_HOLD_SECONDS = 2.5
-
-# --- Phase 6: offline upload queue ---
-UPLOAD_QUEUE_PATH = os.environ.get(
-    "BOOTH_UPLOAD_QUEUE_PATH", "/var/lib/photobooth/upload_queue.json"
-)
-UPLOAD_TIMEOUT_SECONDS = 5.0
-UPLOADING_SCROLL_TEXT = "Uploading...  "
-PENDING_UPLOAD_NOTICE = (
-    "* Photo upload pending - your QR will work \n" "once the booth reconnects to the internet."
-)
-# Worker backoff: start fast (5s) so a transient flap drains promptly;
-# double after each failure; cap at 5 min so a long outage doesn't
-# eat the CPU.
-UPLOAD_WORKER_BACKOFF_INITIAL = 5.0
-UPLOAD_WORKER_BACKOFF_CAP = 300.0
-
-
-class PhotoBooth:
+class PhotoBooth(UploadFlowMixin):
     async def run(self):
         loop = asyncio.get_running_loop()
         self.rpi = RPi()
@@ -221,7 +176,7 @@ class PhotoBooth:
 
         if not self._pending_resume_shots:
             await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-            attract_text = "Press the big blue button to begin!  "
+            attract_text = ATTRACT_SCROLL_TEXT
         else:
             attract_text = "Press the big blue button to continue!  "
         attract = asyncio.create_task(self.panel.scroll(text=attract_text, speed=0.005, count=999))
@@ -259,15 +214,7 @@ class PhotoBooth:
                     logger.info("Capture cancelled by user")
                     self._clear_resume_state()
                     await self._flush_events()
-                    await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-                    logger.debug("Returning to attract mode")
-                    attract = asyncio.create_task(
-                        self.panel.scroll(
-                            text="Press the big blue button to begin!  ",
-                            speed=0.005,
-                            count=999,
-                        )
-                    )
+                    attract = await self._return_to_attract()
                     continue
 
                 self.rpi.copy_to_last_shot(image_path)
@@ -320,15 +267,7 @@ class PhotoBooth:
                 # returning to attract.
                 self._clear_resume_state()
                 await self._flush_events()
-                await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-                logger.debug("Returning to attract mode")
-                attract = asyncio.create_task(
-                    self.panel.scroll(
-                        text="Press the big blue button to begin!  ",
-                        speed=0.005,
-                        count=999,
-                    )
-                )
+                attract = await self._return_to_attract()
 
             elif event == KEEP_BUTTON:
                 if self.uploader is None:
@@ -358,14 +297,7 @@ class PhotoBooth:
                     attract.cancel()
                     await self._flush_events()
                     await self.panel.scroll(text="Max prints reached, sorry!  ", count=1)
-                    await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-                    attract = asyncio.create_task(
-                        self.panel.scroll(
-                            text="Press the big blue button to begin!  ",
-                            speed=0.005,
-                            count=999,
-                        )
-                    )
+                    attract = await self._return_to_attract()
                     continue
 
                 logger.info("Reprinting receipt for %s", last_shot)
@@ -384,26 +316,12 @@ class PhotoBooth:
                 # (which leaves the kiosk on unavailable.png until something
                 # navigates it away). Capture path already calls display_url
                 # after the print resolves; the reprint path didn't.
-                await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-                attract = asyncio.create_task(
-                    self.panel.scroll(
-                        text="Press the big blue button to begin!  ",
-                        speed=0.005,
-                        count=999,
-                    )
-                )
+                attract = await self._return_to_attract()
 
             elif event == REDO_BUTTON:
                 attract.cancel()
                 await self._flush_events()
-                await self.display_url_with_context(ATTRACT_URL, **self._series_params())
-                attract = asyncio.create_task(
-                    self.panel.scroll(
-                        text="Press the big blue button to begin!  ",
-                        speed=0.005,
-                        count=999,
-                    )
-                )
+                attract = await self._return_to_attract()
 
     async def _flush_events(self) -> None:
         """Drain any stale button events left over from the previous action.
@@ -417,6 +335,19 @@ class PhotoBooth:
                 self.rpi.event_queue.get_nowait()
             except Exception:
                 break
+
+    async def _return_to_attract(self) -> asyncio.Task:
+        """Navigate the kiosk to the attract screen and start the looping
+        invite scroll on the LED panel.
+
+        Returns the new scroll task so the caller can cancel it when the
+        next capture or print begins.
+        """
+        await self.display_url_with_context(ATTRACT_URL, **self._series_params())
+        logger.debug("Returning to attract mode")
+        return asyncio.create_task(
+            self.panel.scroll(text=ATTRACT_SCROLL_TEXT, speed=0.005, count=999)
+        )
 
     # ------------------------------------------------------------------
     # Phase 5: unavailable-mode + resume
@@ -442,19 +373,6 @@ class PhotoBooth:
             state_store.delete_if_exists(RESUME_STATE_PATH)
         except Exception as exc:
             logger.warning("Resume state delete failed: %s", exc)
-
-    def _classify_error(self, exc: BaseException, hint: Optional[str] = None) -> tuple:
-        """Map an exception to (component_name, neopixel scroll text).
-
-        ``hint`` lets the caller pin the component (camera vs printer) when
-        the exception type alone is ambiguous (e.g. ``RuntimeError`` is
-        raised by both ``gphoto2`` and ``escpos`` paths).
-        """
-        if hint == "printer":
-            return ("printer", PRINTER_UNAVAILABLE_TEXT)
-        # Default: camera. Phase 5 only wires camera + printer; internet
-        # failures are Phase 6's responsibility (offline queue).
-        return ("camera", CAMERA_UNAVAILABLE_TEXT)
 
     async def display_url_with_context(self, url: str, **params) -> None:
         """Navigate to ``url`` with optional query-string params.
@@ -572,186 +490,6 @@ class PhotoBooth:
             shot=len(shots) + 1,
             total=total,
         )
-
-    # ------------------------------------------------------------------
-    # Phase 6: offline-tolerant upload
-    # ------------------------------------------------------------------
-
-    async def _upload_or_enqueue(self, image_path: str) -> tuple:
-        """Attempt S3 upload with a 5s wall-clock cap; queue on failure.
-
-        Returns ``(qr_url, pending_notice)``:
-
-        * ``qr_url`` — the deterministic ``public_url(key)``. Used as the
-          QR target on the receipt regardless of whether the upload
-          actually completed; if it didn't, the queue worker eventually
-          puts the object at that key.
-        * ``pending_notice`` — None on success, a short string on
-          failure that gets embedded under the QR on the receipt so the
-          user knows to scan again after the booth reconnects.
-
-        ``None, None`` is returned when no uploader was configured (dev
-        environment). Caller treats ``qr_url is None`` as "no receipt".
-
-        The "Uploading..." scroll runs as a background task on the
-        neopixel for the whole window and is cancelled in ``finally``
-        regardless of outcome. ``self._last_uploaded_path`` / ``_key``
-        are populated up front so the reprint path can target the same
-        S3 object whether the upload landed now or via the queue worker.
-        """
-        if self.uploader is None:
-            return (None, None)
-
-        key = self.uploader.make_key(image_path)
-        qr_url = self.uploader.public_url(key)
-        self._last_uploaded_path = image_path
-        self._last_uploaded_key = key
-
-        # Short-circuit when HealthMonitor already knows the network is
-        # down. boto3's blocking executor call can wedge well past the
-        # asyncio.wait_for timeout when DNS itself is unreachable, which
-        # was causing the post-capture flow (receipt print + green-button
-        # consumption) to stall indefinitely on a fully-offline booth.
-        # The queue worker re-attempts once net_www flips back to ready.
-        health = getattr(self, "health", None)
-        net_ready = True if health is None else health.is_ready("net_www")
-        if not net_ready:
-            logger.info(
-                "Network offline (net_www unavailable) — enqueueing key=%s without upload attempt",
-                key,
-            )
-            self._upload_queue.enqueue(key, image_path)
-            return (qr_url, PENDING_UPLOAD_NOTICE)
-
-        logger.info("Uploading: file=%s bucket=%s", image_path, S3_BUCKET)
-        scroll_task = asyncio.create_task(
-            self.panel.scroll(
-                text=UPLOADING_SCROLL_TEXT,
-                speed=0.005,
-                count=999,
-            )
-        )
-        pending_notice = None
-        try:
-            try:
-                await self.uploader.upload_with_timeout(
-                    image_path,
-                    key=key,
-                    timeout_s=UPLOAD_TIMEOUT_SECONDS,
-                )
-            except asyncio.TimeoutError:
-                logger.warning(
-                    "Upload timed out after %.1fs — enqueueing key=%s",
-                    UPLOAD_TIMEOUT_SECONDS,
-                    key,
-                )
-                self._upload_queue.enqueue(key, image_path)
-                pending_notice = PENDING_UPLOAD_NOTICE
-                # Force a recheck so the queue worker waits for recovery
-                # instead of pounding on a known-bad link.
-                if health is not None:
-                    try:
-                        await health._probe_once("net_www")
-                    except Exception as probe_exc:
-                        logger.debug("net_www probe after upload timeout: %s", probe_exc)
-            except Exception as exc:
-                # boto3 client/connection errors land here; any of them
-                # signal "S3 isn't usable right now" — queue and move on.
-                logger.warning("Upload failed (%s) — enqueueing key=%s", exc, key)
-                self._upload_queue.enqueue(key, image_path)
-                pending_notice = PENDING_UPLOAD_NOTICE
-                if health is not None:
-                    try:
-                        await health._probe_once("net_www")
-                    except Exception as probe_exc:
-                        logger.debug("net_www probe after upload error: %s", probe_exc)
-        finally:
-            scroll_task.cancel()
-            try:
-                await scroll_task
-            except asyncio.CancelledError:
-                pass
-            except Exception as exc:
-                logger.debug("Upload scroll exit error: %s", exc)
-            self.panel.clear()
-        return (qr_url, pending_notice)
-
-    async def _upload_queue_worker(self) -> None:
-        """Drain the upload queue while ``HealthMonitor`` reports net_www ready.
-
-        Idle path: peek at queue head; if internet is healthy, attempt
-        the upload; on success ``pop``, on failure ``mark_attempt`` and
-        push net_www to ``unavailable`` (so the recheck loop is the one
-        flipping it back to ``ready`` once connectivity recovers).
-
-        Backoff: ``UPLOAD_WORKER_BACKOFF_INITIAL`` doubles after each
-        consecutive failure, capped at ``UPLOAD_WORKER_BACKOFF_CAP``.
-        A successful drain resets the backoff so the next outage starts
-        fresh from the short interval.
-
-        Cancellable: the task is created in ``_startup`` and stays alive
-        for the booth's lifetime. ``asyncio.CancelledError`` propagates
-        cleanly so a clean shutdown doesn't leave a half-uploaded item.
-        """
-        logger.info("Upload queue worker started")
-        backoff = UPLOAD_WORKER_BACKOFF_INITIAL
-        try:
-            while True:
-                item = self._upload_queue.peek()
-                if item is None:
-                    # Queue empty — short sleep so a freshly enqueued
-                    # item drains promptly without busy-waiting.
-                    await asyncio.sleep(UPLOAD_WORKER_BACKOFF_INITIAL)
-                    backoff = UPLOAD_WORKER_BACKOFF_INITIAL
-                    continue
-
-                if self.uploader is None:
-                    await asyncio.sleep(UPLOAD_WORKER_BACKOFF_CAP)
-                    continue
-
-                # Only attempt when the health monitor says net_www is
-                # ready; otherwise back off and let recheck_loop do its
-                # job. The booth is not a connectivity probe — this loop
-                # is for upload work.
-                try:
-                    net_ready = self.health.is_ready("net_www")
-                except KeyError:
-                    net_ready = False
-                if not net_ready:
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, UPLOAD_WORKER_BACKOFF_CAP)
-                    continue
-
-                try:
-                    await self.uploader.upload(item.image_path, key=item.key)
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    logger.warning(
-                        "Queued upload failed: key=%s attempts=%d err=%s",
-                        item.key,
-                        item.attempts + 1,
-                        exc,
-                    )
-                    self._upload_queue.mark_attempt(item.key, repr(exc))
-                    # Push net_www to unavailable so ``recheck_loop`` polls
-                    # it back to ready when the link returns.
-                    try:
-                        await self.health._probe_once("net_www")
-                    except Exception as probe_exc:  # noqa: BLE001 — probe rules guarantee no raise
-                        logger.debug("net_www probe after upload fail: %s", probe_exc)
-                    await asyncio.sleep(backoff)
-                    backoff = min(backoff * 2, UPLOAD_WORKER_BACKOFF_CAP)
-                    continue
-
-                # Success: drop the item and reset backoff so the next
-                # outage gets the fast initial retry interval again.
-                self._upload_queue.pop(item.key)
-                logger.info("Queued upload completed: key=%s", item.key)
-                backoff = UPLOAD_WORKER_BACKOFF_INITIAL
-        except asyncio.CancelledError:
-            logger.info("Upload queue worker cancelled")
-            raise
 
     # ------------------------------------------------------------------
     # Startup
@@ -1013,8 +751,7 @@ class PhotoBooth:
                 twinkle_task.cancel()
             self.panel.clear()
             logger.error("Camera capture failed: %s", exc)
-            component, scroll_text = self._classify_error(exc, hint="camera")
-            await self._enter_unavailable(component, scroll_text)
+            await self._enter_unavailable("camera", CAMERA_UNAVAILABLE_TEXT)
             # USB re-enumeration on power cycle reassigns the gphoto2
             # ``--port`` address; the stored value goes stale and the
             # next capture would silently return a phantom file again.
@@ -1215,8 +952,7 @@ class PhotoBooth:
             return
         except Exception as exc:
             logger.error("Receipt print failed: %s", exc)
-            component, scroll_text = self._classify_error(exc, hint="printer")
-            await self._enter_unavailable(component, scroll_text)
+            await self._enter_unavailable("printer", PRINTER_UNAVAILABLE_TEXT)
         # USB re-enumeration on power cycle invalidates the cached escpos
         # Usb handle; the next print would re-raise Errno 19 even though
         # the probe reports the printer as ready. Rebuild before retry.
@@ -1244,48 +980,13 @@ class PhotoBooth:
         the capture window, so the user knows their QR will start working
         once the booth reconnects to the internet.
         """
+        # Exceptions propagate to _print_with_recovery, the canonical logger
+        # for printer failures; logging here too produced duplicate "Receipt
+        # print failed" lines on every failure path. Receipt copy lives in
+        # photobooth.receipt so marketing edits don't touch runtime logic.
         logger.debug("Receipt printing started")
-        try:
-            self.printer.text("Capturing Time Photography")
-            self.printer.ln()
-            self.printer.ln()
-            self.printer.text("Thank you for using our photobooth!")
-            self.printer.ln()
-            self.printer.ln()
-            self.printer.text("Please visit us at http://capturingtimephoto.net")
-            self.printer.ln()
-            self.printer.text("    to schedule your free 30 minute consultation")
-            self.printer.ln()
-            self.printer.text("    for your next portrait session or event!")
-            self.printer.ln()
-            self.printer.ln()
-            self.printer.text("Mention this photobooth when you book your next")
-            self.printer.ln()
-            self.printer.text("session with us & receive an extra 10% discount!")
-            self.printer.ln()
-            self.printer.ln()
-            self.printer.text("Scan the QR code below to download your photo:")
-            self.printer.ln()
-            self.printer.qr(content=url, size=5)
-            self.printer.ln()
-            if pending_notice:
-                self.printer.text(pending_notice)
-                self.printer.ln()
-                self.printer.ln()
-            self.printer.text("Reach us at contact@capturingtimephoto.net")
-            self.printer.ln()
-            self.printer.text("Tag us on")
-            self.printer.ln()
-            self.printer.text("Instagram: @capturingtimephoto")
-            self.printer.ln()
-            self.printer.text("Facebook: @capturingtimephotollc")
-            self.printer.cut()
-            logger.debug("Receipt print complete")
-        except Exception:
-            # _print_with_recovery is the canonical logger for printer
-            # failures; logging here too produced duplicate "Receipt
-            # print failed" lines on every failure path.
-            raise
+        receipt.render(self.printer, url, pending_notice)
+        logger.debug("Receipt print complete")
 
 
 def main() -> None:

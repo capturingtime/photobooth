@@ -1,4 +1,5 @@
 """Template loader abstraction — swap LocalTemplateLoader for USB or remote later."""
+
 import json
 from abc import ABC, abstractmethod
 from pathlib import Path

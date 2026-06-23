@@ -28,8 +28,8 @@ COLOR_LIST = ["RED", "GREEN", "BLUE", "YELLOW", "PURPLE", "CYAN", "ORANGE", "PIN
 COLOR_TUPLE_LIST = [RED, GREEN, BLUE, YELLOW, PURPLE, CYAN, ORANGE, PINK, WHITE]
 
 DEFAULT_BRIGHTNESS = 0.1
-DEAFULT_ORDER = neopixel.GRB
-DEAFULT_PIN = board.D18
+DEFAULT_ORDER = neopixel.GRB
+DEFAULT_PIN = board.D18
 DEFAULT_SPEED = 0.005
 
 
@@ -125,18 +125,18 @@ class Neopixel:
     def __init__(
         self,
         name: str = None,
-        control=DEAFULT_PIN,
+        control=DEFAULT_PIN,
         rows: int = 8,
         cols: int = 32,
         brightness: float = DEFAULT_BRIGHTNESS,
-        pixel_order: str = DEAFULT_ORDER,
+        pixel_order: str = DEFAULT_ORDER,
         auto_write: bool = False,
         **kwargs,
     ):
         if not name:
             name = f"neopixel-{id(self)}"
         if not control:
-            control = DEAFULT_PIN
+            control = DEFAULT_PIN
 
         self.name = name
         self.rows = rows
@@ -217,16 +217,12 @@ class Neopixel:
     ) -> Image.Image:
         """Render text into a PIL Image sized for the panel (used by scroll)."""
         if self.rows < 5:
-            raise ValueError(
-                f"Cannot scroll on a board with rows < 5. Board rows: {self.rows}"
-            )
+            raise ValueError(f"Cannot scroll on a board with rows < 5. Board rows: {self.rows}")
         text = str(text)
         if not font_name.endswith(".ttf"):
             font_name = f"{font_name}.ttf"
         if not os.path.exists(f"{RESOURCES}/{font_name}"):
-            raise ValueError(
-                f"Font '{font_name}' not found. Place it in ./resources"
-            )
+            raise ValueError(f"Font '{font_name}' not found. Place it in ./resources")
         font = ImageFont.truetype(f"{RESOURCES}/{font_name}", font_pt)
         text_width, _ = font.getsize(text)
         # cols*2 padding on each side allows text to fully scroll on and off the panel
@@ -325,14 +321,6 @@ class Neopixel:
                 await asyncio.sleep(0)
         self.clear()
         return True
-
-    async def flash(self, **kwargs):
-        """Flash text on the panel (placeholder — delegates to scroll)."""
-        await self.scroll(**kwargs)
-
-    async def cycle_text(self, **kwargs):
-        """Cycle through text on the panel (placeholder — delegates to scroll)."""
-        await self.scroll(**kwargs)
 
     def clear(self) -> bool:
         """Set all pixels to OFF immediately."""

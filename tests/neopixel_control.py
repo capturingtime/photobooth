@@ -28,19 +28,19 @@ def wheel(np, pos):
 
 def rainbow(np, wait_ms=1, iterations=1):
     """Draw rainbow that fades across all pixels at once."""
-    for j in range(255*iterations):
+    for j in range(255 * iterations):
         for i in range(np.n):
             pixel_index = i + j
             np[i] = wheel(np, pixel_index & 255)
         np.show()
-        time.sleep(wait_ms/1000.0)
+        time.sleep(wait_ms / 1000.0)
 
 
 def rainbow_cycle(np, wait_ms=1, iterations=1):
     """Draw rainbow that uniformly distributes itself across all pixels."""
-    for j in range(255*iterations):
+    for j in range(255 * iterations):
         for i in range(np.n):
             pixel_index = (i * 256 // np.n) + j
             np[i] = wheel(np, pixel_index & 255)
         np.show()
-        time.sleep(wait_ms/1000.0)
+        time.sleep(wait_ms / 1000.0)

@@ -12,18 +12,17 @@ countdown_led_pin = 24
 
 
 def check_output_dir():
-    """ Checks that the output directory exists and is writable
-    """
+    """Checks that the output directory exists and is writable"""
 
     if not os.path.exists(OUTPUT_DIR):
         os.mkdir(OUTPUT_DIR)
     elif not os.path.isdir(OUTPUT_DIR):
-        sys.exit(f'The spcified output directory ({OUTPUT_DIR}) exists but is not a directory')
+        sys.exit(f"The spcified output directory ({OUTPUT_DIR}) exists but is not a directory")
     else:
         try:
-            open(OUTPUT_DIR, 'w')
+            open(OUTPUT_DIR, "w")
         except IOError:
-            sys.exit(f'Output directory ({OUTPUT_DIR}) exists and is not writable')
+            sys.exit(f"Output directory ({OUTPUT_DIR}) exists and is not writable")
 
 
 def shutter_countdown(seconds: int = COUNTDOWN):
@@ -31,10 +30,10 @@ def shutter_countdown(seconds: int = COUNTDOWN):
     while i > 0:
         result = set_digit(i)
         if not result:
-            print('Something went wrong when setting the 7seg')
+            print("Something went wrong when setting the 7seg")
         GPIO.output(countdown_led_pin, True)
-        time.sleep(.25)
+        time.sleep(0.25)
         GPIO.output(countdown_led_pin, False)
-        time.sleep(.75)
+        time.sleep(0.75)
         i -= 1
     set_digit(0)

@@ -410,18 +410,18 @@ Full plan including file-by-file change list lives at
 two-class rationale and the CUPS-via-`lp` decision are captured in
 ARCHITECTURE.md under "Printers".
 
-### Doc-vs-code drift (2026-06-16)
+### Doc alignment (2026-06-20)
 
-ARCHITECTURE.md already documents the post-rename world
-(`ThermalPrinter` / `PhotoPrinter`, `thermal_printer.py` /
-`photo_printer.py`, `THERMAL_PRINTER_MAP` / `PHOTO_PRINTER_MAP`,
-`Booth.add_thermal_printer` / `add_photo_printer`, plus the
-`test_thermal_printer.py` / `test_photo_printer.py` test files), but
-the runtime still ships as `photobooth/printer.py` with the original
-`Printer` class, `PRINTER_MAP`, `Booth.add_printer`, and
-`tests/test_printer.py`. The rename was pre-staged in docs while this
-workstream was scoped; when the implementation lands, ARCHITECTURE.md
-needs no further changes — the rename should match what's already
-written. If priorities push the rename further out, consider walking
-the doc back to the current `printer.py` naming so a reader doesn't
-trip on the mismatch.
+ARCHITECTURE.md describes the **current** runtime: a single `Printer`
+class in `photobooth/printer.py` (`PRINTER_MAP`, `Booth.add_printer`,
+`_do_print`, `tests/test_printer.py`). An earlier pass had pre-staged
+the post-rename world in the doc while this workstream was scoped, which
+left it describing code that didn't exist; the doc has since been walked
+back to the shipping state, and this BACKLOG entry is now the canonical
+record of the planned design.
+
+When this workstream lands, update ARCHITECTURE.md to match: rename
+`Printer` → `ThermalPrinter` (`thermal_printer.py`,
+`THERMAL_PRINTER_MAP`, `add_thermal_printer`, `test_thermal_printer.py`)
+and add the `PhotoPrinter` / `photo_printer.py` / `PHOTO_PRINTER_MAP`
+sections plus the two-class "Printers" rewrite.

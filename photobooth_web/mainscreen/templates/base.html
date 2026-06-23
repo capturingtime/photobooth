@@ -1,0 +1,14 @@
+<!DOCTYPE html>
+<html>
+<head>
+  {% block head %}{% endblock %}
+  <style>
+    * { margin: 0; padding: 0; }
+    body { background-color: {% block bg %}black{% endblock %}; }
+    {% block style %}{% endblock %}
+  </style>
+</head>
+<body>
+  {% block body %}{% endblock %}
+</body>
+</html>

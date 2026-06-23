@@ -1,23 +1,21 @@
+{% extends "base.html" %}
 {% load static %}
-<!DOCTYPE html>
-<html>
-<head>
-    <style>
-        body { background-color: black; margin: 0; padding: 0; }
-        .frame { position: relative; width: 100vw; height: 100vh; visibility: hidden; }
-        .background {
-            position: absolute; width: 100%; height: 100%;
-            object-fit: cover;
-        }
-        .photo {
-            position: absolute; width: 100%; height: 100%;
-            object-fit: contain;
-        }
-    </style>
-</head>
-<body>
+{# Distinct from the single/last overlay: the strip sits on top of a
+   cover-fit background plate, full-viewport, rather than behind an aperture. #}
+{% block style %}
+    .frame { position: relative; width: 100vw; height: 100vh; visibility: hidden; }
+    .background {
+        position: absolute; width: 100%; height: 100%;
+        object-fit: cover;
+    }
+    .photo {
+        position: absolute; width: 100%; height: 100%;
+        object-fit: contain;
+    }
+{% endblock %}
+{% block body %}
   <div class="frame" id="frame">
-    <img class="background" id="background" src="{% static "img/series_final.png" %}">
+    <img class="background" id="background" src="{% static 'img/series_final.png' %}">
     <img class="photo" id="photo">
   </div>
   <script>
@@ -30,5 +28,4 @@
     ph.src = "{% static 'img/last.jpg' %}?" + Date.now();
     if (ph.complete && bg.complete) reveal();
   </script>
-</body>
-</html>
+{% endblock %}

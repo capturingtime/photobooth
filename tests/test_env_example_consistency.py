@@ -17,14 +17,11 @@ import pytest
 
 PHOTOBOOTH_ROOT = Path(__file__).resolve().parents[1]
 SIBLING_ENV_EXAMPLE = (
-    PHOTOBOOTH_ROOT.parent
-    / "rpi_provisioning"
-    / "booth_boot"
-    / "resources"
-    / "booth.env.example"
+    PHOTOBOOTH_ROOT.parent / "rpi_provisioning" / "booth_boot" / "resources" / "booth.env.example"
 )
 
 CONSUMER_SOURCES = [
+    PHOTOBOOTH_ROOT / "photobooth" / "config.py",
     PHOTOBOOTH_ROOT / "photobooth" / "booth_main.py",
     PHOTOBOOTH_ROOT / "photobooth" / "logging_config.py",
 ]
@@ -37,9 +34,7 @@ ENV_KEY_PATTERN = re.compile(r"^\s*#?\s*(BOOTH_[A-Z0-9_]+)\s*=", re.MULTILINE)
 # Match the env-var name inside `os.environ.get("BOOTH_X", ...)` or
 # `os.environ["BOOTH_X"]`. Anchoring on `os.environ` avoids false positives
 # from docstring text or Python identifiers that happen to share the prefix.
-CONSUMER_PATTERN = re.compile(
-    r"""os\.environ(?:\.get\(|\[)\s*["'](BOOTH_[A-Z0-9_]+)["']"""
-)
+CONSUMER_PATTERN = re.compile(r"""os\.environ(?:\.get\(|\[)\s*["'](BOOTH_[A-Z0-9_]+)["']""")
 
 
 def _read_or_skip(path: Path) -> str:

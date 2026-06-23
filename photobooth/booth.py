@@ -34,14 +34,6 @@ def arp_list(broadcast_ip: str = "255.255.255.255") -> list:
     return result
 
 
-def run_local_cmd(cmd: str):
-    """Run a shell command synchronously. Used during startup only."""
-    try:
-        return subprocess.run(cmd, shell=True, capture_output=True)
-    except Exception as err:
-        logger.warning("run_local_cmd failed: %s", err)
-
-
 async def probe_internet_available(host: str = "http://google.com") -> bool:
     """Async wrapper around ``connect`` for ``HealthMonitor`` use (v0.5.0 Phase 4)."""
     loop = asyncio.get_running_loop()
@@ -139,7 +131,8 @@ class Booth:
         return self._kiosk_process
 
     def copy_to_last_shot(self, last_shot: str) -> bool:
-        """Copy the captured image to the path Django serves as last.html background."""
+        """Copy the captured image to the ``last.jpg`` the kiosk review and
+        final screens layer beneath their overlay PNGs."""
         if not getattr(self, "_last_shot_tgt", None):
             self._init_last_shot()
         try:
@@ -160,16 +153,12 @@ class Booth:
         import websockets
 
         try:
-            with urllib.request.urlopen(
-                "http://localhost:9222/json", timeout=1
-            ) as resp:
+            with urllib.request.urlopen("http://localhost:9222/json", timeout=1) as resp:
                 tabs = json.loads(resp.read())
             ws_url = tabs[0]["webSocketDebuggerUrl"]
             async with websockets.connect(ws_url) as ws:
                 await ws.send(
-                    json.dumps(
-                        {"id": 1, "method": "Page.navigate", "params": {"url": url}}
-                    )
+                    json.dumps({"id": 1, "method": "Page.navigate", "params": {"url": url}})
                 )
                 await ws.recv()
         except Exception:
@@ -178,10 +167,6 @@ class Booth:
                 stdout=asyncio.subprocess.DEVNULL,
                 stderr=asyncio.subprocess.DEVNULL,
             )
-
-    async def display_last_shot(self) -> None:
-        """Navigate the kiosk browser to the last-shot display page."""
-        await self.display_url("http://127.0.0.1:8000/main/last/")
 
     def reset_last_shot(self) -> bool:
         """Reset last.jpg to the placeholder image."""
@@ -219,9 +204,7 @@ class Booth:
     def _init_neopixel(**kwargs):
         return Neopixel(**kwargs)
 
-    def add_neopixel(
-        self, name: str = None, control=None, rows: int = 8, cols: int = 32, **kwargs
-    ):
+    def add_neopixel(self, name: str = None, control=None, rows: int = 8, cols: int = 32, **kwargs):
         if not getattr(self, "neopixels", None):
             self.neopixels = list()
         if not name:

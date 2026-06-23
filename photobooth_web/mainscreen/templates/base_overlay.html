@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% load static %}
+{# Captured photo behind a full-frame transparent overlay PNG. The frame
+   stays hidden until both images load, preventing a bare-photo flash. #}
+{% block style %}
+    .frame {
+        position: relative;
+        width: 1920px;
+        height: 1080px;
+        visibility: hidden;
+    }
+    .photo {
+        position: absolute;
+        top: 135px;
+        left: 352px;
+        width: 1215px;
+        height: 810px;
+        object-fit: cover;
+        object-position: center;
+    }
+    .overlay {
+        position: absolute;
+        top: 0;
+        left: 0;
+        width: 1920px;
+        height: 1080px;
+    }
+{% endblock %}
+{% block body %}
+  <div class="frame" id="frame">
+    <img class="photo" id="photo">
+    <img class="overlay" id="overlay" src="{% block overlay_image %}{% endblock %}">
+    {% block banner %}{% endblock %}
+  </div>
+  <script>
+    var ph = document.getElementById('photo');
+    var ov = document.getElementById('overlay');
+    var fr = document.getElementById('frame');
+    function reveal() { if (ph.complete && ov.complete) fr.style.visibility = 'visible'; }
+    ph.onload = reveal;
+    ov.onload = reveal;
+    ph.src = "{% static 'img/last.jpg' %}?" + Date.now();
+    if (ph.complete && ov.complete) reveal();
+  </script>
+{% endblock %}

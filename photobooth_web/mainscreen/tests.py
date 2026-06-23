@@ -31,18 +31,6 @@ class ViewTests(TestCase):
         self.assertContains(response, "attract_static.png")
 
     # ------------------------------------------------------------------
-    # last shot display
-    # ------------------------------------------------------------------
-
-    def test_last_status(self):
-        response = self.client.get(reverse("last"))
-        self.assertEqual(response.status_code, 200)
-
-    def test_last_template(self):
-        response = self.client.get(reverse("last"))
-        self.assertTemplateUsed(response, "last.html")
-
-    # ------------------------------------------------------------------
     # series_capture
     # ------------------------------------------------------------------
 

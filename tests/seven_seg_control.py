@@ -22,17 +22,17 @@ gpio_pins = {
     "b_left": 16,  # E / 1
     "b_right": 26,  # C / 4
     "bot": 20,  # D / 2
-    "d_point": 21  # D.P. / 5
+    "d_point": 21,  # D.P. / 5
 }
 
 
 def init_gpio(debug=False):
-    """ Initializes the GPIO pins according to the dict mapping in gpio_pins
+    """Initializes the GPIO pins according to the dict mapping in gpio_pins
 
     # Add intelligence to invert for ANODE/CATHODE
 
     """
-    print('Initializing GPIO')
+    print("Initializing GPIO")
 
     if not debug:
         GPIO.setwarnings(False)
@@ -47,23 +47,22 @@ def init_gpio(debug=False):
     # Cute init sequence to blink the Dot
     i = 3
     while i > 0:
-        GPIO.output(gpio_pins['d_point'], True)
-        time.sleep(.25)
-        GPIO.output(gpio_pins['d_point'], False)
-        time.sleep(.75)
+        GPIO.output(gpio_pins["d_point"], True)
+        time.sleep(0.25)
+        GPIO.output(gpio_pins["d_point"], False)
+        time.sleep(0.75)
         i -= 1
 
     # Set the Display to all off with DP on
     reset_7seg()
 
-    print('Init Complete')
+    print("Init Complete")
 
     return True
 
 
 def reset_7seg():
-    """ Turns off the 7seg display and turns on Dot
-    """
+    """Turns off the 7seg display and turns on Dot"""
     if not GPIO.getmode():
         init_gpio()
 
@@ -76,18 +75,17 @@ def reset_7seg():
 
 
 def set_digit(digit: int = 0) -> bool:
-    """ Sets the digit of the 7seg
-    """
+    """Sets the digit of the 7seg"""
 
     if not GPIO.getmode():
         init_gpio()
 
     if not isinstance(digit, int):
-        print(f'digit is not type: int for set_digit(). Received: {digit} ({type(digit)})')
+        print(f"digit is not type: int for set_digit(). Received: {digit} ({type(digit)})")
         return None
 
     if digit > 9:
-        print(f'The maximum supported digit is 9. Received: {digit}')
+        print(f"The maximum supported digit is 9. Received: {digit}")
         return None
 
     # (top, t_left, t_right, center, b_left, b_right, bot, d_point)
@@ -101,7 +99,7 @@ def set_digit(digit: int = 0) -> bool:
         6: (True, True, False, True, True, True, True, True),
         7: (True, False, True, False, False, True, False, False),
         8: (True, True, True, True, True, True, True, False),
-        9: (True, True, True, True, False, True, True, True)
+        9: (True, True, True, True, False, True, True, True),
     }
 
     i = 0
@@ -112,17 +110,18 @@ def set_digit(digit: int = 0) -> bool:
 
         cur_state = bool(GPIO.input(pin))  # Convert the int value to bool
         if states[i] is not cur_state:
-            print(f'Failed to set pin {pin} ({seg}) state. Attempted: {states[i]} Current: {cur_state}')  # noqa: E501
+            print(
+                f"Failed to set pin {pin} ({seg}) state. Attempted: {states[i]} Current: {cur_state}"
+            )  # noqa: E501
             return False
         i += 1
-    print(f'7 Segment display set to digit: {digit}')
+    print(f"7 Segment display set to digit: {digit}")
     return True
 
 
 def digit_map():
-    """ Displays the current pin mapping with states
-    """
+    """Displays the current pin mapping with states"""
     for seg, pin in gpio_pins.items():
         cur_state = bool(GPIO.input(pin))
         alt_state = "On" if cur_state else "Off"
-        print(f'Pin {pin} is currently set to {cur_state} ({alt_state})')
+        print(f"Pin {pin} is currently set to {cur_state} ({alt_state})")

@@ -4,6 +4,73 @@ All notable changes to this project are documented here.
 Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/);
 versions follow [Semantic Versioning](https://semver.org/).
 
+## [v0.6.0] — 2026-06-22
+
+Maintenance and code-health release. No runtime behavior changes: the
+capture → review → upload → print flow, the health/unavailable/offline-queue
+subsystems, and every kiosk screen render identically to v0.5.0. This release
+is a structural cleanup from a full code audit — `booth_main.py` is split into
+focused modules, the kiosk templates move to inheritance, two latent printer
+bugs are fixed, and a vestigial screen path plus a legacy example are retired.
+
+Upgrade is a single `pip install --force-reinstall`; no provisioning,
+config, or deployment-model changes from v0.5.0.
+
+### Changed
+
+- **`booth_main.py` slimmed 1,301 → 1,002 LOC** by extracting three cohesive
+  modules (public method names and behavior unchanged):
+  - **`photobooth/config.py`** — all `BOOTH_*` env-var constants and runtime
+    defaults, so `booth_main` reads configuration instead of parsing the
+    environment inline.
+  - **`photobooth/receipt.py`** — `render(printer, url, pending_notice)`, the
+    receipt marketing copy + QR layout as a pure, unit-testable function.
+  - **`photobooth/upload_flow.py`** — `UploadFlowMixin` carrying the Phase 6
+    upload subsystem (`_upload_or_enqueue`, `_upload_queue_worker`), mixed into
+    `PhotoBooth`.
+- **Kiosk templates collapsed onto inheritance** — `base.html` +
+  `base_centered.html` + `base_overlay.html`; the eight leaf templates now
+  declare only what differs (image, overlay, banner, background). Rendered
+  output (photo aperture geometry, image filenames, banner text) is unchanged.
+- **Deduplicated the main-loop "return to attract" sequence** behind a single
+  `_return_to_attract()` helper (was copy-pasted across five sites).
+- **Tree-wide `black` formatting** (line-length 100) across the package, the
+  Django project, tests, and bench scripts.
+
+### Fixed
+
+- **`Printer.__init__` USB-kwarg override** — iterated `kwargs` keys instead of
+  `.items()` and compared against the `getfullargspec` namedtuple rather than
+  its `.args`, so any passed override raised or was silently ignored.
+- **`Printer` no longer mutates the shared `PRINTER_MAP`** — the per-printer
+  spec is deep-copied, so an override (or any later change) can't leak across
+  printer instances or test runs. Both fixes are covered by new regression
+  tests.
+- **`DEAFULT_ORDER` / `DEAFULT_PIN` typos** in `neopixel.py` corrected to
+  `DEFAULT_ORDER` / `DEFAULT_PIN`.
+
+### Removed
+
+- **The vestigial `last` screen path** — `last` view, `/main/last/` URL,
+  `last.html`, and `Booth.display_last_shot()`. The product runtime uses
+  `last_capture`, never `last`. `copy_to_last_shot` / `reset_last_shot` /
+  `last.jpg` and the `index` (`/main/`) readiness endpoint are retained.
+- **`examples/booth_init.py`** — a hand-rolled pre-`booth_main` entry point,
+  superseded by the `photobooth-run` console script and the only caller of the
+  removed `last` path.
+- **Stale `setup.py`** (conflicting metadata) — `pyproject.toml` is the single
+  packaging source of truth.
+- **Dead code** — the duplicate `run_local_cmd` in `booth.py`, the placeholder
+  `Neopixel.flash()` / `cycle_text()`, a commented-out `Printer.__getattr__`,
+  and `self.inputs = locals()`.
+
+### Docs
+
+- **`ARCHITECTURE.md`** rewritten to describe the actual single `Printer`
+  (the prior text documented an abandoned thermal/photo printer split; that
+  design is preserved in `BACKLOG.md`).
+- **`CODE_AUDIT.md`** added — the full audit findings and per-tier execution log.
+
 ## [v0.5.0] — 2026-06-20
 
 User-experience and reliability release. Trims countdown to a flat 2 s,

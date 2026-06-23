@@ -22,11 +22,8 @@ import pytest
 sys.modules.setdefault("board", MagicMock())
 
 from photobooth import booth_main  # noqa: E402
-from photobooth.booth_main import (  # noqa: E402
-    PENDING_UPLOAD_NOTICE,
-    UPLOADING_SCROLL_TEXT,
-    PhotoBooth,
-)
+from photobooth.booth_main import PhotoBooth  # noqa: E402
+from photobooth.config import PENDING_UPLOAD_NOTICE, UPLOADING_SCROLL_TEXT  # noqa: E402
 from photobooth.upload_queue import UploadQueue  # noqa: E402
 
 

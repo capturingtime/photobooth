@@ -19,13 +19,9 @@ photobooth/           ← installable Python package
     rpi.py            ← RPi(Booth) — GPIO interrupt → asyncio event bridge
     camera.py         ← Camera — gphoto2 wrapper, async capture, per-camera startup config
     neopixel.py       ← Neopixel — ws281x panel animations (scroll, twinkle, rainbow…)
-    thermal_printer.py← ThermalPrinter — ESC/POS receipt printer (PBM-8350U).
-                         Renamed from the older `printer.py` / `Printer` once
-                         a second printer class was added; the old name was
-                         silently opinionated to a thermal device.
-    photo_printer.py  ← PhotoPrinter — CUPS-backed dye-sub photo printer
-                         (Canon Selphy CP1500). Shells out to `lp` — no
-                         Python CUPS bindings, keeps Buster/Py3.7 happy.
+    printer.py        ← Printer — ESC/POS receipt printer (PBM-8350U) over raw
+                         USB via `python-escpos`. Prints the marketing receipt
+                         with the photo's QR code.
     uploader.py       ← Uploader — S3 upload, presigned URL, randomised key paths
     strip.py          ← PhotoStrip — Pillow compositor; supports multi-column tiling
     template_loader.py← TemplateLoader ABC + LocalTemplateLoader
@@ -52,8 +48,7 @@ PhotoBooth (booth_main.py)
 │   ├── next_event()              await next GPIO event string from queue
 │   ├── add_camera()              → Camera
 │   ├── add_neopixel()            → Neopixel
-│   ├── add_thermal_printer()     → ThermalPrinter   (receipt / QR)
-│   └── add_photo_printer()       → PhotoPrinter     (4×6 dye-sub)
+│   └── add_printer()             → Printer          (receipt / QR)
 │
 ├── Camera (camera.py)
 │   ├── __init__(model, startup_config=None)
@@ -105,8 +100,7 @@ points: start of `_review_shot()`, start of `_series_capture_review()`, return t
 |---|---|
 | Pillow compositing (`PhotoStrip.compose`) | `loop.run_in_executor(None, fn, ...)` |
 | Image compression (`_compress_image`) | `loop.run_in_executor(None, fn, ...)` |
-| ESC/POS receipt printing (`_do_thermal_print`) | `loop.run_in_executor(None, fn, ...)` |
-| CUPS photo printing (`_do_photo_print`) | `loop.run_in_executor(None, fn, ...)` — `lp` subprocess |
+| ESC/POS receipt printing (`_do_print`) | `loop.run_in_executor(None, fn, ...)` |
 | gphoto2 capture (`capture_async`) | `asyncio.create_subprocess_exec` |
 
 ### Background tasks
@@ -435,78 +429,52 @@ restart.
 
 ---
 
-## Printers
+## Printer
 
-The booth drives two physically and protocol-distinct printers. They share
-nothing at the wire level, so they are modelled as two separate classes
-rather than a single `PrinterBackend` ABC — forcing a common interface
-would collapse to a single `print_something()` method that means different
-things on each side, which hurts more than it helps.
+The booth drives a single printer: a PBM-8350U thermal receipt printer.
+After each capture it prints a marketing receipt carrying the photo's QR
+code (a presigned, or queued-deterministic, S3 URL) so the customer can
+download their shot.
 
 | Class | Module | Device | Protocol | Backend |
 |---|---|---|---|---|
-| `ThermalPrinter` | `thermal_printer.py` | PBM-8350U thermal receipt printer | ESC/POS over raw USB endpoint | `python-escpos` → `escpos.printer.Usb` |
-| `PhotoPrinter` | `photo_printer.py` | Canon Selphy CP1500 dye-sub photo printer | CUPS print queue | system `lp` binary via `subprocess` |
+| `Printer` | `printer.py` | PBM-8350U thermal receipt printer | ESC/POS over raw USB endpoint | `python-escpos` → `escpos.printer.Usb` |
 
-### Why `ThermalPrinter` (renamed from `Printer`)
+`Printer.__init__(name, model, **kwargs)` resolves `model` against
+`PRINTER_MAP` (keyed by model string, falling back to `"default"`) to get
+the `escpos.printer.Usb` vendor/product config, then opens the device. Its
+method surface (`text`, `ln`, `cut`, `qr`, `barcode`) is a thin wrapper
+over the escpos `Usb` object. The booth registers it via
+`Booth.add_printer(name="receipt", model="PBM-8350U")`.
 
-The original `printer.py` / `Printer` class predates any plan to add a
-second printer. Its constructor, `PRINTER_MAP`, and entire method surface
-(`text`, `ln`, `cut`, `qr`, `barcode`) are opinionated to a thermal
-receipt device and are thin wrappers around `escpos.printer.Usb`. Once a
-second printer class entered the design, the bare name `Printer` became
-actively misleading — anyone reading `self.printer.qr(...)` would
-reasonably assume the printer abstraction is generic, when in fact it
-hard-binds to ESC/POS.
+### Receipt printing in the flow
 
-The rename `Printer` → `ThermalPrinter`, `PRINTER_MAP` → `THERMAL_PRINTER_MAP`,
-and `Booth.add_printer` → `Booth.add_thermal_printer` makes the protocol
-coupling visible at every call site. The receipt-printing code path is
-otherwise unchanged.
+`PhotoBooth._do_print(url, pending_notice=None)` is the synchronous
+receipt routine; it runs in the thread executor (it is the only blocking
+ESC/POS path). It writes the marketing copy, emits the QR via
+`self.printer.qr(content=url, size=5)`, optionally prints the
+`pending_notice` line (set when the upload was queued rather than
+completed — see [Offline Uploads](#offline-uploads)), and cuts the paper.
 
-### `PhotoPrinter` — CUPS via `lp`
+`_print_with_recovery(url, pending_notice, post_recovery_url)` wraps
+`_do_print` in the thread executor and, on failure, routes through
+unavailable mode (red "Printer not responding" scroll +
+`wait_until_ready("printer")`), calls `Printer.reconnect()` to rebuild the
+escpos `Usb` handle after a possible power cycle, re-navigates the kiosk to
+`post_recovery_url`, and retries the print. It is the canonical logger for
+printer failures, so `_do_print` re-raises silently rather than
+double-logging.
 
-`PhotoPrinter` does not import `pycups`. It shells out to the system `lp`
-binary via `subprocess.run`. Two reasons:
+### Planned: photo printer separation
 
-1. **No C-extension build on Buster/Py3.7.** The live booth's Python is
-   3.7 on Buster; `rawpy` already failed to build there (see auto-memory).
-   Adding a second compiled dependency for what amounts to `lp -d <queue>
-   <file>` would be gratuitous.
-2. **CUPS is already the integration surface.** The CP1500 driver
-   (Gutenprint's `selphy_print` backend, or Solomon Peachy's standalone
-   build on Buster — see BACKLOG) lives behind a CUPS queue. Whatever
-   talks to `lp` is portable across driver versions for free.
-
-Construction takes a CUPS queue name (e.g. `Canon_Selphy_CP1500`) plus a
-model key into `PHOTO_PRINTER_MAP` that carries default `lp` options
-(`media=Postcard.Fullbleed`, fit-to-page, etc.). At startup,
-`_verify_queue()` calls `lpstat -p <queue>` and raises if the queue is
-missing — fail fast rather than discover at first print.
-
-### Wiring into the capture flow
-
-```
-PhotoStrip.compose(shots, strip_path)        ← single-strip JPEG  (S3 + kiosk review)
-PhotoStrip.expand_for_print(strip_path,      ← column-tiled JPEG  (print only)
-                            print_path)
-ThermalPrinter.qr(url) / .text(...) / .cut() ← receipt with QR
-PhotoPrinter.print_image(print_path)         ← lp -d <queue> -o media=... <file>
-```
-
-Receipt and photo prints run as **independent** `run_in_executor` calls
-from the final-screen handler — they are fired in parallel since the
-devices share no resource. A failure in either path is logged and
-swallowed so a paper jam on one printer never blocks the other (or the
-booth's return to attract).
-
-### CP1500 system prerequisites (per Pi, one-time)
-
-CUPS + Gutenprint (plus the queue definition) are not Python deps and
-are not handled by `pip install`. They are documented under "Installing
-on a Pi" in the package README, and the BACKLOG entry for the CP1500
-workstream tracks the Buster-specific Gutenprint version risk
-(CP1500 hardware postdates Buster's apt Gutenprint package).
+A future revision adds a second, protocol-distinct printer — a Canon
+Selphy CP1500 dye-sub for 4×6 prints (CUPS via `lp`), alongside renaming
+`Printer` → `ThermalPrinter` to make the ESC/POS coupling explicit once a
+generic-looking name would mislead. `PhotoStrip.expand_for_print()`
+already exists for the column-tiled 4×6 sheet that workstream needs, but
+nothing calls it in the runtime today. The full design (two-class
+rationale, CUPS-via-`lp`, CP1500 driver/Gutenprint risk on Buster) lives
+in `BACKLOG.md` → "Canon Selphy CP1500 photo printer integration".
 
 ---
 
@@ -594,11 +562,11 @@ If `columns <= 1`, no duplication is needed and the method is a pass-through:
 `input_path` is returned unchanged and no file is written. Callers can use the
 returned path unconditionally without branching on column count.
 
-Called from `booth_main.py` immediately after `compose()` whenever a
-`PhotoPrinter` is online; the resulting print-ready file is what
-`PhotoPrinter.print_image()` hands to `lp`. The single-strip output from
-`compose()` stays the source of truth for the S3 upload and the kiosk
-review screen — only the print path uses the column-tiled variant.
+`expand_for_print` is implemented and tested but not yet wired into the
+runtime — `booth_main.py` does not call it today. It exists for the planned
+photo-printer path (a column-tiled 4×6 sheet for the Canon Selphy CP1500;
+see `BACKLOG.md`). The single-strip output from `compose()` is the source
+of truth for the S3 upload and the kiosk review screen.
 
 ### Mode selection (`booth_main.py` constants)
 
@@ -700,7 +668,7 @@ flowchart TD
     RESHOW -->|"red — redo that slot"| POP["Pop last shot from list"]
     POP --> COUNTDOWN
 
-    COMPOSE["Compose strip\n(run_in_executor)\nexpand_for_print if columns > 1"]
+    COMPOSE["Compose strip\n(run_in_executor)"]
     COMPOSE --> UPLOAD["_upload_or_enqueue (Phase 6)\nUploading... scroll (5 s cap)"]
     UPLOAD -->|"success"| FINAL
     UPLOAD -->|"timeout/error"| QUEUE["UploadQueue.enqueue\npending_notice = on"]
@@ -806,16 +774,14 @@ before importing `booth_main`.
 
 | Test file | Covers |
 |---|---|
-| `test_strip.py` | `PhotoStrip` init / compose / center-crop; real template + sidecar integration; `expand_for_print` duplication and pass-through. |
-| `test_template_loader.py` (in `test_strip.py`) | `LocalTemplateLoader` happy / missing path / malformed JSON. |
+| `test_strip.py` | `PhotoStrip` init / compose / center-crop; real template + sidecar integration; `expand_for_print` duplication and pass-through; `LocalTemplateLoader` happy / missing path / malformed JSON. |
 | `test_uploader.py` | `make_key` token uniqueness (reprint-bug regression), key format, `public_url` shape, `upload()` returns plain URL not presigned, error path re-raises. |
 | `test_logging_no_credentials.py` | Scans every log record (message + args) for `AKIA` / `X-Amz-Signature` / `Signature=` / etc. across upload + presign paths. Hard-blocks credential-leak regressions. |
 | `test_logging_config.py` | `setup_logging` idempotency, `BOOTH_LOG_LEVEL` handling (case-insensitive, bad-value fallback), unwritable log-file fallback. |
 | `test_booth_main_env.py` | Defaults + overrides for all 6 `BOOTH_*` constants. |
 | `test_env_example_consistency.py` | Cross-repo: every `BOOTH_*` key in `rpi_provisioning/booth_boot/resources/booth.env.example` is consumed by `booth_main` / `logging_config`, and vice versa. Catches doc-vs-code drift. |
 | `test_camera.py` | `run_local_cmd` (error path → `logger.error`), `_build_filename`, `check_gphoto2`, `check_dir_rw_or_make`, `_read_exif_datetime` (never-raises guarantee). |
-| `test_thermal_printer.py` | `THERMAL_PRINTER_MAP` resolution (default + PBM-8350U), escpos passthroughs, `ln()` edge cases. `python-escpos`-gated. Renamed from `test_printer.py` alongside the `Printer` → `ThermalPrinter` rename. |
-| `test_photo_printer.py` | `PHOTO_PRINTER_MAP` resolution (default + CP1500), `lp` argv construction, job-ID parsing, missing-queue and missing-`lp` error paths. `subprocess.run` mocked end-to-end — no CUPS required at test time. |
+| `test_printer.py` | `PRINTER_MAP` resolution (default + PBM-8350U), escpos passthroughs, `ln()` edge cases. `python-escpos`-gated. |
 | `test_series_flow.py` | `PhotoBooth._series_capture_review` — all six scenarios (continue, start_over, undo-redo, undo-keep, re-affirm-keep, re-affirm-redo). Pins the buffer-after-re-review contract. |
 | `test_neopixel_scroll_duration.py` *(v0.5.0)* | `Neopixel.scroll_for_duration` derives per-frame speed so total wall-clock matches the requested duration within tolerance. |
 | `test_capture_timing.py` *(v0.5.0)* | End-to-end timing of `_take_one_shot`: button press → `capture_async` dispatch ≤ 2.0 s ±5%. |
